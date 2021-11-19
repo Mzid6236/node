@@ -27,7 +27,8 @@ struct V8StackTraceId;
 
 class StackFrame {
  public:
-  explicit StackFrame(v8::Isolate* isolate, v8::Local<v8::StackFrame> frame);
+  StackFrame(String16&& functionName, int scriptId, String16&& sourceURL,
+             int lineNumber, int columnNumber, bool hasSourceURLComment);
   ~StackFrame() = default;
 
   const String16& functionName() const;
@@ -118,7 +119,8 @@ class AsyncStackTrace {
   AsyncStackTrace& operator=(const AsyncStackTrace&) = delete;
   static std::shared_ptr<AsyncStackTrace> capture(V8Debugger*,
                                                   const String16& description,
-                                                  int maxStackSize);
+                                                  int maxStackSize,
+                                                  bool skipTopFrame = false);
   static uintptr_t store(V8Debugger* debugger,
                          std::shared_ptr<AsyncStackTrace> stack);
 

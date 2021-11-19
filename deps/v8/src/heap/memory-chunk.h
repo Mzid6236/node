@@ -189,17 +189,16 @@ class MemoryChunk : public BasicMemoryChunk {
   // MemoryChunk::synchronized_heap() to simulate the barrier.
   void InitializationMemoryFence();
 
+  static PageAllocator::Permission GetCodeModificationPermission() {
+    return FLAG_write_code_using_rwx ? PageAllocator::kReadWriteExecute
+                                     : PageAllocator::kReadWrite;
+  }
+
   V8_EXPORT_PRIVATE void SetReadable();
   V8_EXPORT_PRIVATE void SetReadAndExecutable();
-  V8_EXPORT_PRIVATE void SetReadAndWritable();
 
-  void SetDefaultCodePermissions() {
-    if (FLAG_jitless) {
-      SetReadable();
-    } else {
-      SetReadAndExecutable();
-    }
-  }
+  V8_EXPORT_PRIVATE void SetCodeModificationPermissions();
+  V8_EXPORT_PRIVATE void SetDefaultCodePermissions();
 
   heap::ListNode<MemoryChunk>& list_node() { return list_node_; }
   const heap::ListNode<MemoryChunk>& list_node() const { return list_node_; }

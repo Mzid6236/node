@@ -17,7 +17,8 @@
 // and resetting these counters.
 
 // Make sure to sync the following with src/compiler/globals.h.
-#if defined(V8_TARGET_ARCH_X64)
+#if defined(V8_TARGET_ARCH_X64) || \
+    (defined(V8_TARGET_ARCH_ARM64) && !defined(USE_SIMULATOR))
 #define V8_ENABLE_FP_PARAMS_IN_C_LINKAGE
 #endif
 
@@ -95,10 +96,8 @@ class FastCApiObject {
 
 #ifdef V8_ENABLE_FP_PARAMS_IN_C_LINKAGE
   typedef double Type;
-#define type_info kTypeInfoFloat64
 #else
   typedef int32_t Type;
-#define type_info kTypeInfoInt32
 #endif  // V8_ENABLE_FP_PARAMS_IN_C_LINKAGE
   static Type AddAllSequenceFastCallback(Local<Object> receiver,
                                          bool should_fallback,
@@ -120,8 +119,8 @@ class FastCApiObject {
     }
 
     Type buffer[1024];
-    bool result = TryCopyAndConvertArrayToCppBuffer<&type_info, Type>(
-        seq_arg, buffer, 1024);
+    bool result = TryToCopyAndConvertArrayToCppBuffer<
+        CTypeInfoBuilder<Type>::Build().GetId(), Type>(seq_arg, buffer, 1024);
     if (!result) {
       options.fallback = 1;
       return 0;
@@ -575,6 +574,26 @@ Local<FunctionTemplate> Shell::CreateTestFastCApiTemplate(Isolate* isolate) {
             Local<Value>(), signature, 1, ConstructorBehavior::kThrow,
             SideEffectType::kHasSideEffect,
             &add_all_uint32_typed_array_c_func));
+
+    CFunction add_all_float32_typed_array_c_func =
+        CFunction::Make(FastCApiObject::AddAllTypedArrayFastCallback<float>);
+    api_obj_ctor->PrototypeTemplate()->Set(
+        isolate, "add_all_float32_typed_array",
+        FunctionTemplate::New(
+            isolate, FastCApiObject::AddAllTypedArraySlowCallback,
+            Local<Value>(), signature, 1, ConstructorBehavior::kThrow,
+            SideEffectType::kHasSideEffect,
+            &add_all_float32_typed_array_c_func));
+
+    CFunction add_all_float64_typed_array_c_func =
+        CFunction::Make(FastCApiObject::AddAllTypedArrayFastCallback<double>);
+    api_obj_ctor->PrototypeTemplate()->Set(
+        isolate, "add_all_float64_typed_array",
+        FunctionTemplate::New(
+            isolate, FastCApiObject::AddAllTypedArraySlowCallback,
+            Local<Value>(), signature, 1, ConstructorBehavior::kThrow,
+            SideEffectType::kHasSideEffect,
+            &add_all_float64_typed_array_c_func));
 
     const CFunction add_all_overloads[] = {
         add_all_uint32_typed_array_c_func,

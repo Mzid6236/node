@@ -46,7 +46,7 @@ Reduction CsaLoadElimination::Reduce(Node* node) {
     case IrOpcode::kStoreToObject:
       return ReduceStoreToObject(node, ObjectAccessOf(node->op()));
     case IrOpcode::kDebugBreak:
-    case IrOpcode::kAbortCSAAssert:
+    case IrOpcode::kAbortCSADcheck:
       // Avoid changing optimizations in the presence of debug instructions.
       return PropagateInputState(node);
     case IrOpcode::kCall:
@@ -348,6 +348,9 @@ Reduction CsaLoadElimination::ReduceLoadFromObject(Node* node,
       Node* replacement =
           TruncateAndExtend(lookup_result.value, from, access.machine_type);
       ReplaceWithValue(node, replacement, effect);
+      // This might have opened an opportunity for escape analysis to eliminate
+      // the object altogether.
+      Revisit(object);
       return Replace(replacement);
     }
   }

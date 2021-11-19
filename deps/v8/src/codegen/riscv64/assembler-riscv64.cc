@@ -576,7 +576,7 @@ void Assembler::target_at_put(int pos, int target_pos, bool is_internal,
         instr_at_put(pos, instr);
         instr_at_put(pos + 4, kNopByte);
       } else {
-        DCHECK(is_int32(offset));
+        CHECK(is_int32(offset + 0x800));
 
         int32_t Hi20 = (((int32_t)offset + 0x800) >> 12);
         int32_t Lo12 = (int32_t)offset << 20 >> 20;
@@ -703,7 +703,7 @@ void Assembler::next(Label* L, bool is_internal) {
   if (link == kEndOfChain) {
     L->Unuse();
   } else {
-    DCHECK_GT(link, 0);
+    DCHECK_GE(link, 0);
     DEBUG_PRINTF("next: %p to %p (%d)\n", L,
                  reinterpret_cast<Instr*>(buffer_start_ + link), link);
     L->link_to(link);
@@ -766,9 +766,9 @@ int Assembler::PatchBranchlongOffset(Address pc, Instr instr_auipc,
                                      Instr instr_jalr, int32_t offset) {
   DCHECK(IsAuipc(instr_auipc));
   DCHECK(IsJalr(instr_jalr));
+  CHECK(is_int32(offset + 0x800));
   int32_t Hi20 = (((int32_t)offset + 0x800) >> 12);
   int32_t Lo12 = (int32_t)offset << 20 >> 20;
-  CHECK(is_int32(offset));
   instr_at_put(pc, SetAuipcOffset(Hi20, instr_auipc));
   instr_at_put(pc + 4, SetJalrOffset(Lo12, instr_jalr));
   DCHECK(offset ==
@@ -1151,6 +1151,16 @@ void Assembler::GenInstrV(uint8_t funct6, Opcode opcode, VRegister vd,
                 ((vs2.code() & 0x1F) << kRvvVs2Shift);
   emit(instr);
 }
+
+void Assembler::GenInstrV(uint8_t funct6, Opcode opcode, VRegister vd,
+                          int8_t vs1, VRegister vs2, MaskType mask) {
+  DCHECK(opcode == OP_MVV || opcode == OP_FVV || opcode == OP_IVV);
+  Instr instr = (funct6 << kRvvFunct6Shift) | opcode | (mask << kRvvVmShift) |
+                ((vd.code() & 0x1F) << kRvvVdShift) |
+                ((vs1 & 0x1F) << kRvvVs1Shift) |
+                ((vs2.code() & 0x1F) << kRvvVs2Shift);
+  emit(instr);
+}
 // OPMVV OPFVV
 void Assembler::GenInstrV(uint8_t funct6, Opcode opcode, Register rd,
                           VRegister vs1, VRegister vs2, MaskType mask) {
@@ -1162,13 +1172,35 @@ void Assembler::GenInstrV(uint8_t funct6, Opcode opcode, Register rd,
   emit(instr);
 }
 
-// OPIVX OPFVF OPMVX
+// OPFVV
+void Assembler::GenInstrV(uint8_t funct6, Opcode opcode, FPURegister fd,
+                          VRegister vs1, VRegister vs2, MaskType mask) {
+  DCHECK(opcode == OP_FVV);
+  Instr instr = (funct6 << kRvvFunct6Shift) | opcode | (mask << kRvvVmShift) |
+                ((fd.code() & 0x1F) << kRvvVdShift) |
+                ((vs1.code() & 0x1F) << kRvvVs1Shift) |
+                ((vs2.code() & 0x1F) << kRvvVs2Shift);
+  emit(instr);
+}
+
+// OPIVX OPMVX
 void Assembler::GenInstrV(uint8_t funct6, Opcode opcode, VRegister vd,
                           Register rs1, VRegister vs2, MaskType mask) {
-  DCHECK(opcode == OP_IVX || opcode == OP_FVF || opcode == OP_MVX);
+  DCHECK(opcode == OP_IVX || opcode == OP_MVX);
   Instr instr = (funct6 << kRvvFunct6Shift) | opcode | (mask << kRvvVmShift) |
                 ((vd.code() & 0x1F) << kRvvVdShift) |
                 ((rs1.code() & 0x1F) << kRvvRs1Shift) |
+                ((vs2.code() & 0x1F) << kRvvVs2Shift);
+  emit(instr);
+}
+
+// OPFVF
+void Assembler::GenInstrV(uint8_t funct6, Opcode opcode, VRegister vd,
+                          FPURegister fs1, VRegister vs2, MaskType mask) {
+  DCHECK(opcode == OP_FVF);
+  Instr instr = (funct6 << kRvvFunct6Shift) | opcode | (mask << kRvvVmShift) |
+                ((vd.code() & 0x1F) << kRvvVdShift) |
+                ((fs1.code() & 0x1F) << kRvvRs1Shift) |
                 ((vs2.code() & 0x1F) << kRvvVs2Shift);
   emit(instr);
 }
@@ -2485,10 +2517,35 @@ void Assembler::vmadc_vi(VRegister vd, uint8_t imm5, VRegister vs2) {
   GenInstrV(VMADC_FUNCT6, vd, imm5, vs2, Mask);
 }
 
+void Assembler::vrgather_vv(VRegister vd, VRegister vs2, VRegister vs1,
+                            MaskType mask) {
+  DCHECK_NE(vd, vs1);
+  DCHECK_NE(vd, vs2);
+  GenInstrV(VRGATHER_FUNCT6, OP_IVV, vd, vs1, vs2, mask);
+}
+
+void Assembler::vrgather_vi(VRegister vd, VRegister vs2, int8_t imm5,
+                            MaskType mask) {
+  DCHECK_NE(vd, vs2);
+  GenInstrV(VRGATHER_FUNCT6, vd, imm5, vs2, mask);
+}
+
+void Assembler::vrgather_vx(VRegister vd, VRegister vs2, Register rs1,
+                            MaskType mask) {
+  DCHECK_NE(vd, vs2);
+  GenInstrV(VRGATHER_FUNCT6, OP_IVX, vd, rs1, vs2, mask);
+}
+
 #define DEFINE_OPIVV(name, funct6)                                      \
   void Assembler::name##_vv(VRegister vd, VRegister vs2, VRegister vs1, \
                             MaskType mask) {                            \
     GenInstrV(funct6, OP_IVV, vd, vs1, vs2, mask);                      \
+  }
+
+#define DEFINE_OPFVV(name, funct6)                                      \
+  void Assembler::name##_vv(VRegister vd, VRegister vs2, VRegister vs1, \
+                            MaskType mask) {                            \
+    GenInstrV(funct6, OP_FVV, vd, vs1, vs2, mask);                      \
   }
 
 #define DEFINE_OPIVX(name, funct6)                                     \
@@ -2509,6 +2566,38 @@ void Assembler::vmadc_vi(VRegister vd, uint8_t imm5, VRegister vs2) {
     GenInstrV(funct6, OP_MVV, vd, vs1, vs2, mask);                      \
   }
 
+#define DEFINE_OPFVF(name, funct6)                                        \
+  void Assembler::name##_vf(VRegister vd, VRegister vs2, FPURegister fs1, \
+                            MaskType mask) {                              \
+    GenInstrV(funct6, OP_FVF, vd, fs1, vs2, mask);                        \
+  }
+
+#define DEFINE_OPFVV_FMA(name, funct6)                                  \
+  void Assembler::name##_vv(VRegister vd, VRegister vs1, VRegister vs2, \
+                            MaskType mask) {                            \
+    GenInstrV(funct6, OP_FVV, vd, vs1, vs2, mask);                      \
+  }
+
+#define DEFINE_OPFVF_FMA(name, funct6)                                    \
+  void Assembler::name##_vf(VRegister vd, FPURegister fs1, VRegister vs2, \
+                            MaskType mask) {                              \
+    GenInstrV(funct6, OP_FVF, vd, fs1, vs2, mask);                        \
+  }
+
+// vector integer extension
+#define DEFINE_OPMVV_VIE(name, vs1)                                  \
+  void Assembler::name(VRegister vd, VRegister vs2, MaskType mask) { \
+    GenInstrV(VXUNARY0_FUNCT6, OP_MVV, vd, vs1, vs2, mask);          \
+  }
+
+void Assembler::vfmv_vf(VRegister vd, FPURegister fs1, MaskType mask) {
+  GenInstrV(VMV_FUNCT6, OP_FVF, vd, fs1, v0, mask);
+}
+
+void Assembler::vfmv_fs(FPURegister fd, VRegister vs2, MaskType mask) {
+  GenInstrV(VWFUNARY0_FUNCT6, OP_FVV, fd, v0, vs2, mask);
+}
+
 DEFINE_OPIVV(vadd, VADD_FUNCT6)
 DEFINE_OPIVX(vadd, VADD_FUNCT6)
 DEFINE_OPIVI(vadd, VADD_FUNCT6)
@@ -2517,9 +2606,9 @@ DEFINE_OPIVX(vsub, VSUB_FUNCT6)
 DEFINE_OPIVX(vsadd, VSADD_FUNCT6)
 DEFINE_OPIVV(vsadd, VSADD_FUNCT6)
 DEFINE_OPIVI(vsadd, VSADD_FUNCT6)
-DEFINE_OPIVX(vsaddu, VSADD_FUNCT6)
-DEFINE_OPIVV(vsaddu, VSADD_FUNCT6)
-DEFINE_OPIVI(vsaddu, VSADD_FUNCT6)
+DEFINE_OPIVX(vsaddu, VSADDU_FUNCT6)
+DEFINE_OPIVV(vsaddu, VSADDU_FUNCT6)
+DEFINE_OPIVI(vsaddu, VSADDU_FUNCT6)
 DEFINE_OPIVX(vssub, VSSUB_FUNCT6)
 DEFINE_OPIVV(vssub, VSSUB_FUNCT6)
 DEFINE_OPIVX(vssubu, VSSUBU_FUNCT6)
@@ -2543,9 +2632,6 @@ DEFINE_OPIVI(vor, VOR_FUNCT6)
 DEFINE_OPIVV(vxor, VXOR_FUNCT6)
 DEFINE_OPIVX(vxor, VXOR_FUNCT6)
 DEFINE_OPIVI(vxor, VXOR_FUNCT6)
-DEFINE_OPIVV(vrgather, VRGATHER_FUNCT6)
-DEFINE_OPIVX(vrgather, VRGATHER_FUNCT6)
-DEFINE_OPIVI(vrgather, VRGATHER_FUNCT6)
 
 DEFINE_OPIVX(vslidedown, VSLIDEDOWN_FUNCT6)
 DEFINE_OPIVI(vslidedown, VSLIDEDOWN_FUNCT6)
@@ -2592,9 +2678,71 @@ DEFINE_OPMVV(vredmaxu, VREDMAXU_FUNCT6)
 DEFINE_OPMVV(vredmax, VREDMAX_FUNCT6)
 DEFINE_OPMVV(vredmin, VREDMIN_FUNCT6)
 DEFINE_OPMVV(vredminu, VREDMINU_FUNCT6)
+
+DEFINE_OPFVV(vfadd, VFADD_FUNCT6)
+DEFINE_OPFVF(vfadd, VFADD_FUNCT6)
+DEFINE_OPFVV(vfsub, VFSUB_FUNCT6)
+DEFINE_OPFVF(vfsub, VFSUB_FUNCT6)
+DEFINE_OPFVV(vfdiv, VFDIV_FUNCT6)
+DEFINE_OPFVF(vfdiv, VFDIV_FUNCT6)
+DEFINE_OPFVV(vfmul, VFMUL_FUNCT6)
+DEFINE_OPFVF(vfmul, VFMUL_FUNCT6)
+DEFINE_OPFVV(vmfeq, VMFEQ_FUNCT6)
+DEFINE_OPFVV(vmfne, VMFNE_FUNCT6)
+DEFINE_OPFVV(vmflt, VMFLT_FUNCT6)
+DEFINE_OPFVV(vmfle, VMFLE_FUNCT6)
+DEFINE_OPFVV(vfmax, VFMAX_FUNCT6)
+DEFINE_OPFVV(vfmin, VFMIN_FUNCT6)
+
+DEFINE_OPFVV(vfsngj, VFSGNJ_FUNCT6)
+DEFINE_OPFVF(vfsngj, VFSGNJ_FUNCT6)
+DEFINE_OPFVV(vfsngjn, VFSGNJN_FUNCT6)
+DEFINE_OPFVF(vfsngjn, VFSGNJN_FUNCT6)
+DEFINE_OPFVV(vfsngjx, VFSGNJX_FUNCT6)
+DEFINE_OPFVF(vfsngjx, VFSGNJX_FUNCT6)
+
+// Vector Single-Width Floating-Point Fused Multiply-Add Instructions
+DEFINE_OPFVV_FMA(vfmadd, VFMADD_FUNCT6)
+DEFINE_OPFVF_FMA(vfmadd, VFMADD_FUNCT6)
+DEFINE_OPFVV_FMA(vfmsub, VFMSUB_FUNCT6)
+DEFINE_OPFVF_FMA(vfmsub, VFMSUB_FUNCT6)
+DEFINE_OPFVV_FMA(vfmacc, VFMACC_FUNCT6)
+DEFINE_OPFVF_FMA(vfmacc, VFMACC_FUNCT6)
+DEFINE_OPFVV_FMA(vfmsac, VFMSAC_FUNCT6)
+DEFINE_OPFVF_FMA(vfmsac, VFMSAC_FUNCT6)
+DEFINE_OPFVV_FMA(vfnmadd, VFNMADD_FUNCT6)
+DEFINE_OPFVF_FMA(vfnmadd, VFNMADD_FUNCT6)
+DEFINE_OPFVV_FMA(vfnmsub, VFNMSUB_FUNCT6)
+DEFINE_OPFVF_FMA(vfnmsub, VFNMSUB_FUNCT6)
+DEFINE_OPFVV_FMA(vfnmacc, VFNMACC_FUNCT6)
+DEFINE_OPFVF_FMA(vfnmacc, VFNMACC_FUNCT6)
+DEFINE_OPFVV_FMA(vfnmsac, VFNMSAC_FUNCT6)
+DEFINE_OPFVF_FMA(vfnmsac, VFNMSAC_FUNCT6)
+
+// Vector Narrowing Fixed-Point Clip Instructions
+DEFINE_OPIVV(vnclip, VNCLIP_FUNCT6)
+DEFINE_OPIVX(vnclip, VNCLIP_FUNCT6)
+DEFINE_OPIVI(vnclip, VNCLIP_FUNCT6)
+DEFINE_OPIVV(vnclipu, VNCLIPU_FUNCT6)
+DEFINE_OPIVX(vnclipu, VNCLIPU_FUNCT6)
+DEFINE_OPIVI(vnclipu, VNCLIPU_FUNCT6)
+
+// Vector Integer Extension
+DEFINE_OPMVV_VIE(vzext_vf8, 0b00010)
+DEFINE_OPMVV_VIE(vsext_vf8, 0b00011)
+DEFINE_OPMVV_VIE(vzext_vf4, 0b00100)
+DEFINE_OPMVV_VIE(vsext_vf4, 0b00101)
+DEFINE_OPMVV_VIE(vzext_vf2, 0b00110)
+DEFINE_OPMVV_VIE(vsext_vf2, 0b00111)
+
 #undef DEFINE_OPIVI
 #undef DEFINE_OPIVV
 #undef DEFINE_OPIVX
+#undef DEFINE_OPFVV
+#undef DEFINE_OPFVF
+#undef DEFINE_OPFVV_FMA
+#undef DEFINE_OPFVF_FMA
+#undef DEFINE_OPMVV_VIE
 
 void Assembler::vsetvli(Register rd, Register rs1, VSew vsew, Vlmul vlmul,
                         TailAgnosticType tail, MaskAgnosticType mask) {
@@ -3232,12 +3380,10 @@ int Assembler::li_estimate(int64_t imm, bool is_get_temp_reg) {
     // plus the number of zeros between the parts. Each part is added after the
     // left shift.
     uint32_t mask = 0x80000000;
-    int32_t shift_val = 0;
     int32_t i;
     for (i = 0; i < 32; i++) {
       if ((low_32 & mask) == 0) {
         mask >>= 1;
-        shift_val++;
         if (i == 31) {
           // rest is zero
           count++;
@@ -3245,21 +3391,17 @@ int Assembler::li_estimate(int64_t imm, bool is_get_temp_reg) {
         continue;
       }
       // The first 1 seen
-      int32_t part;
       if ((i + 11) < 32) {
         // Pick 11 bits
-        part = ((uint32_t)(low_32 << i) >> i) >> (32 - (i + 11));
         count++;
         count++;
         i += 10;
         mask >>= 11;
       } else {
-        part = (uint32_t)(low_32 << i) >> i;
         count++;
         count++;
         break;
       }
-      shift_val = 0;
     }
   }
   return count;
@@ -3413,28 +3555,8 @@ void Assembler::RelocateRelativeReference(RelocInfo::Mode rmode, Address pc,
   }
 }
 
-void Assembler::FixOnHeapReferences(bool update_embedded_objects) {
-  if (!update_embedded_objects) return;
-  for (auto p : saved_handles_for_raw_object_ptr_) {
-    Address address = reinterpret_cast<Address>(buffer_->start() + p.first);
-    Handle<HeapObject> object(reinterpret_cast<Address*>(p.second));
-    set_target_value_at(address, object->ptr());
-  }
-}
-
-void Assembler::FixOnHeapReferencesToHandles() {
-  for (auto p : saved_handles_for_raw_object_ptr_) {
-    Address address = reinterpret_cast<Address>(buffer_->start() + p.first);
-    set_target_value_at(address, p.second);
-  }
-  saved_handles_for_raw_object_ptr_.clear();
-}
-
 void Assembler::GrowBuffer() {
   DEBUG_PRINTF("GrowBuffer: %p -> ", buffer_start_);
-  bool previously_on_heap = buffer_->IsOnHeap();
-  int previous_on_heap_gc_count = OnHeapGCCount();
-
   // Compute new buffer size.
   int old_size = buffer_->size();
   int new_size = std::min(2 * old_size, old_size + 1 * MB);
@@ -3474,15 +3596,6 @@ void Assembler::GrowBuffer() {
     RelocInfo::Mode rmode = it.rinfo()->rmode();
     if (rmode == RelocInfo::INTERNAL_REFERENCE) {
       RelocateInternalReference(rmode, it.rinfo()->pc(), pc_delta);
-    }
-  }
-
-  // Fix on-heap references.
-  if (previously_on_heap) {
-    if (buffer_->IsOnHeap()) {
-      FixOnHeapReferences(previous_on_heap_gc_count != OnHeapGCCount());
-    } else {
-      FixOnHeapReferencesToHandles();
     }
   }
 
@@ -3584,7 +3697,7 @@ void Assembler::CheckTrampolinePool() {
       for (int i = 0; i < unbound_labels_count_; i++) {
         int64_t imm64;
         imm64 = branch_long_offset(&after_pool);
-        DCHECK(is_int32(imm64));
+        CHECK(is_int32(imm64 + 0x800));
         int32_t Hi20 = (((int32_t)imm64 + 0x800) >> 12);
         int32_t Lo12 = (int32_t)imm64 << 20 >> 20;
         auipc(t6, Hi20);  // Read PC + Hi20 into t6
@@ -3628,7 +3741,7 @@ void Assembler::set_target_address_at(Address pc, Address constant_pool,
       int64_t imm = (int64_t)target - (int64_t)pc;
       Instr instr = instr_at(pc);
       Instr instr1 = instr_at(pc + 1 * kInstrSize);
-      DCHECK(is_int32(imm));
+      DCHECK(is_int32(imm + 0x800));
       int num = PatchBranchlongOffset(pc, instr, instr1, (int32_t)imm);
       if (icache_flush_mode != SKIP_ICACHE_FLUSH) {
         FlushInstructionCache(pc, num * kInstrSize);
@@ -3830,9 +3943,9 @@ void ConstantPool::SetLoadOffsetToConstPoolEntry(int load_offset,
   int32_t distance = static_cast<int32_t>(
       reinterpret_cast<Address>(entry_offset) -
       reinterpret_cast<Address>(assm_->toAddress(load_offset)));
+  CHECK(is_int32(distance + 0x800));
   int32_t Hi20 = (((int32_t)distance + 0x800) >> 12);
   int32_t Lo12 = (int32_t)distance << 20 >> 20;
-  CHECK(is_int32(distance));
   assm_->instr_at_put(load_offset, SetAuipcOffset(Hi20, instr_auipc));
   assm_->instr_at_put(load_offset + 4, SetLdOffset(Lo12, instr_ld));
 }

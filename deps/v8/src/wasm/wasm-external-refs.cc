@@ -56,7 +56,12 @@ void f32_ceil_wrapper(Address data) {
 }
 
 void f32_nearest_int_wrapper(Address data) {
-  WriteUnalignedValue<float>(data, nearbyintf(ReadUnalignedValue<float>(data)));
+  float input = ReadUnalignedValue<float>(data);
+  float value = nearbyintf(input);
+#if V8_OS_AIX
+  value = FpOpWorkaround<float>(input, value);
+#endif
+  WriteUnalignedValue<float>(data, value);
 }
 
 void f64_trunc_wrapper(Address data) {
@@ -72,8 +77,12 @@ void f64_ceil_wrapper(Address data) {
 }
 
 void f64_nearest_int_wrapper(Address data) {
-  WriteUnalignedValue<double>(data,
-                              nearbyint(ReadUnalignedValue<double>(data)));
+  double input = ReadUnalignedValue<double>(data);
+  double value = nearbyint(input);
+#if V8_OS_AIX
+  value = FpOpWorkaround<double>(input, value);
+#endif
+  WriteUnalignedValue<double>(data, value);
 }
 
 void int64_to_float32_wrapper(Address data) {
@@ -548,6 +557,7 @@ inline void* ArrayElementAddress(WasmArray array, uint32_t index,
 void array_copy_wrapper(Address raw_instance, Address raw_dst_array,
                         uint32_t dst_index, Address raw_src_array,
                         uint32_t src_index, uint32_t length) {
+  DCHECK_GT(length, 0);
   ThreadNotInWasmScope thread_not_in_wasm_scope;
   DisallowGarbageCollection no_gc;
   WasmArray dst_array = WasmArray::cast(Object(raw_dst_array));

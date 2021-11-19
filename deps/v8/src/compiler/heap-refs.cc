@@ -1272,8 +1272,8 @@ bool JSObjectData::SerializeAsBoilerplateRecursive(JSHeapBroker* broker,
       boilerplate->map().instance_descriptors(isolate), isolate);
   for (InternalIndex i : boilerplate->map().IterateOwnDescriptors()) {
     PropertyDetails details = descriptors->GetDetails(i);
-    if (details.location() != kField) continue;
-    DCHECK_EQ(kData, details.kind());
+    if (details.location() != PropertyLocation::kField) continue;
+    DCHECK_EQ(PropertyKind::kData, details.kind());
 
     FieldIndex field_index = FieldIndex::ForDescriptor(boilerplate->map(), i);
     // Make sure {field_index} agrees with {inobject_properties} on the index of
@@ -1469,7 +1469,7 @@ ObjectData* JSHeapBroker::TryGetOrCreateData(Handle<Object> object,
 
 #define CREATE_DATA(Name)                                             \
   if (object->Is##Name()) {                                           \
-    RefsMap::Entry* entry = refs_->LookupOrInsert(object.address());  \
+    entry = refs_->LookupOrInsert(object.address());                  \
     object_data = zone()->New<ref_traits<Name>::data_type>(           \
         this, &entry->value, Handle<Name>::cast(object),              \
         ObjectDataKindFor(ref_traits<Name>::ref_serialization_kind)); \
@@ -1778,11 +1778,6 @@ MapRef MapRef::FindFieldOwner(InternalIndex descriptor_index) const {
   return MakeRefAssumeMemoryFence(
       broker(),
       object()->FindFieldOwner(broker()->isolate(), descriptor_index));
-}
-
-ObjectRef MapRef::GetFieldType(InternalIndex descriptor_index) const {
-  CHECK_LT(descriptor_index.as_int(), NumberOfOwnDescriptors());
-  return instance_descriptors().GetFieldType(descriptor_index);
 }
 
 base::Optional<ObjectRef> StringRef::GetCharAsStringOrUndefined(
@@ -2605,12 +2600,6 @@ NameRef DescriptorArrayRef::GetPropertyKey(
   return result;
 }
 
-ObjectRef DescriptorArrayRef::GetFieldType(
-    InternalIndex descriptor_index) const {
-  return MakeRef(broker(),
-                 Object::cast(object()->GetFieldType(descriptor_index)));
-}
-
 base::Optional<ObjectRef> DescriptorArrayRef::GetStrongValue(
     InternalIndex descriptor_index) const {
   HeapObject heap_object;
@@ -2787,6 +2776,10 @@ SharedFunctionInfoRef::function_template_info() const {
 
 int SharedFunctionInfoRef::context_header_size() const {
   return object()->scope_info().ContextHeaderLength();
+}
+
+int SharedFunctionInfoRef::context_parameters_start() const {
+  return object()->scope_info().ParametersStartIndex();
 }
 
 ScopeInfoRef SharedFunctionInfoRef::scope_info() const {

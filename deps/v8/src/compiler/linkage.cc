@@ -208,6 +208,18 @@ int CallDescriptor::CalculateFixedFrameSize(CodeKind code_kind) const {
   UNREACHABLE();
 }
 
+void CallDescriptor::ComputeParamCounts() const {
+  gp_param_count_ = 0;
+  fp_param_count_ = 0;
+  for (size_t i = 0; i < ParameterCount(); ++i) {
+    if (IsFloatingPoint(GetParameterType(i).representation())) {
+      ++fp_param_count_.value();
+    } else {
+      ++gp_param_count_.value();
+    }
+  }
+}
+
 CallDescriptor* Linkage::ComputeIncoming(Zone* zone,
                                          OptimizedCompilationInfo* info) {
 #if V8_ENABLE_WEBASSEMBLY
@@ -505,6 +517,9 @@ CallDescriptor* Linkage::GetStubCallDescriptor(
       CallDescriptor::kCanUseRoots | flags,  // flags
       descriptor.DebugName(),                // debug name
       descriptor.GetStackArgumentOrder(),    // stack order
+#if V8_ENABLE_WEBASSEMBLY
+      nullptr,  // wasm function signature
+#endif
       allocatable_registers);
 }
 

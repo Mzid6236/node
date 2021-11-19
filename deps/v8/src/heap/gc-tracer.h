@@ -7,6 +7,7 @@
 
 #include "include/v8-metrics.h"
 #include "src/base/compiler-specific.h"
+#include "src/base/macros.h"
 #include "src/base/optional.h"
 #include "src/base/platform/platform.h"
 #include "src/base/platform/time.h"
@@ -31,23 +32,24 @@ enum ScavengeSpeedMode { kForAllObjects, kForSurvivedObjects };
 #define TRACE_GC_CATEGORIES \
   "devtools.timeline," TRACE_DISABLED_BY_DEFAULT("v8.gc")
 
-#define TRACE_GC(tracer, scope_id)                            \
-  GCTracer::Scope::ScopeId gc_tracer_scope_id(scope_id);      \
-  GCTracer::Scope gc_tracer_scope(tracer, gc_tracer_scope_id, \
-                                  ThreadKind::kMain);         \
-  TRACE_EVENT0(TRACE_GC_CATEGORIES, GCTracer::Scope::Name(gc_tracer_scope_id))
+#define TRACE_GC(tracer, scope_id)                                    \
+  GCTracer::Scope UNIQUE_IDENTIFIER(gc_tracer_scope)(                 \
+      tracer, GCTracer::Scope::ScopeId(scope_id), ThreadKind::kMain); \
+  TRACE_EVENT0(TRACE_GC_CATEGORIES,                                   \
+               GCTracer::Scope::Name(GCTracer::Scope::ScopeId(scope_id)))
 
-#define TRACE_GC1(tracer, scope_id, thread_kind)                            \
-  GCTracer::Scope::ScopeId gc_tracer_scope_id(scope_id);                    \
-  GCTracer::Scope gc_tracer_scope(tracer, gc_tracer_scope_id, thread_kind); \
-  TRACE_EVENT0(TRACE_GC_CATEGORIES, GCTracer::Scope::Name(gc_tracer_scope_id))
+#define TRACE_GC1(tracer, scope_id, thread_kind)                \
+  GCTracer::Scope UNIQUE_IDENTIFIER(gc_tracer_scope)(           \
+      tracer, GCTracer::Scope::ScopeId(scope_id), thread_kind); \
+  TRACE_EVENT0(TRACE_GC_CATEGORIES,                             \
+               GCTracer::Scope::Name(GCTracer::Scope::ScopeId(scope_id)))
 
-#define TRACE_GC_EPOCH(tracer, scope_id, thread_kind)                          \
-  GCTracer::Scope::ScopeId gc_tracer_scope_id(scope_id);                       \
-  GCTracer::Scope gc_tracer_scope(tracer, gc_tracer_scope_id, thread_kind);    \
-  CollectionEpoch gc_tracer_epoch = tracer->CurrentEpoch(scope_id);            \
-  TRACE_EVENT1(TRACE_GC_CATEGORIES, GCTracer::Scope::Name(gc_tracer_scope_id), \
-               "epoch", gc_tracer_epoch)
+#define TRACE_GC_EPOCH(tracer, scope_id, thread_kind)                     \
+  GCTracer::Scope UNIQUE_IDENTIFIER(gc_tracer_scope)(                     \
+      tracer, GCTracer::Scope::ScopeId(scope_id), thread_kind);           \
+  TRACE_EVENT1(TRACE_GC_CATEGORIES,                                       \
+               GCTracer::Scope::Name(GCTracer::Scope::ScopeId(scope_id)), \
+               "epoch", tracer->CurrentEpoch(scope_id))
 
 // GCTracer collects and prints ONE line after each garbage collector
 // invocation IFF --trace_gc is used.
@@ -59,11 +61,11 @@ class V8_EXPORT_PRIVATE GCTracer {
   struct IncrementalMarkingInfos {
     IncrementalMarkingInfos() : duration(0), longest_step(0), steps(0) {}
 
-    void Update(double duration) {
+    void Update(double delta) {
       steps++;
-      this->duration += duration;
-      if (duration > longest_step) {
-        longest_step = duration;
+      duration += delta;
+      if (delta > longest_step) {
+        longest_step = delta;
       }
     }
 
@@ -73,8 +75,8 @@ class V8_EXPORT_PRIVATE GCTracer {
       steps = 0;
     }
 
-    double duration;
-    double longest_step;
+    double duration;      // in ms
+    double longest_step;  // in ms
     int steps;
   };
 
@@ -181,10 +183,11 @@ class V8_EXPORT_PRIVATE GCTracer {
     // Bytes marked incrementally for INCREMENTAL_MARK_COMPACTOR
     size_t incremental_marking_bytes;
 
-    // Duration of incremental marking steps for INCREMENTAL_MARK_COMPACTOR.
+    // Duration (in ms) of incremental marking steps for
+    // INCREMENTAL_MARK_COMPACTOR.
     double incremental_marking_duration;
 
-    // Amounts of time spent in different scopes during GC.
+    // Amounts of time (in ms) spent in different scopes during GC.
     double scopes[Scope::NUMBER_OF_SCOPES];
 
     // Holds details for incremental marking scopes.
@@ -419,6 +422,7 @@ class V8_EXPORT_PRIVATE GCTracer {
 
   void ReportFullCycleToRecorder();
   void ReportIncrementalMarkingStepToRecorder();
+  void ReportYoungCycleToRecorder();
 
   // Pointer to the heap that owns this tracer.
   Heap* heap_;
@@ -434,8 +438,8 @@ class V8_EXPORT_PRIVATE GCTracer {
   // the last mark compact GC.
   size_t incremental_marking_bytes_;
 
-  // Duration of incremental marking steps since the end of the last mark-
-  // compact event.
+  // Duration (in ms) of incremental marking steps since the end of the last
+  // mark-compact event.
   double incremental_marking_duration_;
 
   double incremental_marking_start_time_;
@@ -458,7 +462,7 @@ class V8_EXPORT_PRIVATE GCTracer {
   size_t old_generation_allocation_counter_bytes_;
   size_t embedder_allocation_counter_bytes_;
 
-  // Accumulated duration and allocated bytes since the last GC.
+  // Accumulated duration (in ms) and allocated bytes since the last GC.
   double allocation_duration_since_gc_;
   size_t new_space_allocation_in_bytes_since_gc_;
   size_t old_generation_allocation_in_bytes_since_gc_;

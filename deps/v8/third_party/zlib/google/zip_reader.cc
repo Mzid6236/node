@@ -9,7 +9,6 @@
 #include "base/bind.h"
 #include "base/files/file.h"
 #include "base/logging.h"
-#include "base/macros.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/threading/sequenced_task_runner_handle.h"
@@ -36,6 +35,10 @@ namespace {
 class StringWriterDelegate : public WriterDelegate {
  public:
   StringWriterDelegate(size_t max_read_bytes, std::string* output);
+
+  StringWriterDelegate(const StringWriterDelegate&) = delete;
+  StringWriterDelegate& operator=(const StringWriterDelegate&) = delete;
+
   ~StringWriterDelegate() override;
 
   // WriterDelegate methods:
@@ -52,8 +55,6 @@ class StringWriterDelegate : public WriterDelegate {
  private:
   size_t max_read_bytes_;
   std::string* output_;
-
-  DISALLOW_COPY_AND_ASSIGN(StringWriterDelegate);
 };
 
 StringWriterDelegate::StringWriterDelegate(size_t max_read_bytes,

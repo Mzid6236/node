@@ -162,9 +162,9 @@ void InstructionSelector::VisitStackSlot(Node* node) {
        sequence()->AddImmediate(Constant(slot)), 0, nullptr);
 }
 
-void InstructionSelector::VisitAbortCSAAssert(Node* node) {
+void InstructionSelector::VisitAbortCSADcheck(Node* node) {
   PPCOperandGenerator g(this);
-  Emit(kArchAbortCSAAssert, g.NoOutput(), g.UseFixed(node->InputAt(0), r4));
+  Emit(kArchAbortCSADcheck, g.NoOutput(), g.UseFixed(node->InputAt(0), r4));
 }
 
 static void VisitLoadCommon(InstructionSelector* selector, Node* node,
@@ -193,6 +193,7 @@ static void VisitLoadCommon(InstructionSelector* selector, Node* node,
       break;
     case MachineRepresentation::kCompressedPointer:  // Fall through.
     case MachineRepresentation::kCompressed:
+    case MachineRepresentation::kCagedPointer:  // Fall through.
 #ifdef V8_COMPRESS_POINTERS
       opcode = kPPC_LoadWordS32;
       mode = kInt16Imm_4ByteAligned;
@@ -338,6 +339,7 @@ void VisitStoreCommon(InstructionSelector* selector, Node* node,
         break;
       case MachineRepresentation::kCompressedPointer:  // Fall through.
       case MachineRepresentation::kCompressed:
+      case MachineRepresentation::kCagedPointer:  // Fall through.
 #ifdef V8_COMPRESS_POINTERS
         opcode = kPPC_StoreCompressTagged;
         break;

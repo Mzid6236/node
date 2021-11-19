@@ -292,6 +292,7 @@ ArchOpcode SelectLoadOpcode(LoadRepresentation load_rep) {
       break;
     case MachineRepresentation::kCompressedPointer:  // Fall through.
     case MachineRepresentation::kCompressed:
+    case MachineRepresentation::kCagedPointer:  // Fall through.
 #ifdef V8_COMPRESS_POINTERS
       opcode = kS390_LoadWordS32;
       break;
@@ -689,9 +690,9 @@ void InstructionSelector::VisitStackSlot(Node* node) {
        sequence()->AddImmediate(Constant(slot)), 0, nullptr);
 }
 
-void InstructionSelector::VisitAbortCSAAssert(Node* node) {
+void InstructionSelector::VisitAbortCSADcheck(Node* node) {
   S390OperandGenerator g(this);
-  Emit(kArchAbortCSAAssert, g.NoOutput(), g.UseFixed(node->InputAt(0), r3));
+  Emit(kArchAbortCSADcheck, g.NoOutput(), g.UseFixed(node->InputAt(0), r3));
 }
 
 void InstructionSelector::VisitLoad(Node* node, Node* value,
@@ -774,6 +775,7 @@ static void VisitGeneralStore(
         break;
       case MachineRepresentation::kCompressedPointer:  // Fall through.
       case MachineRepresentation::kCompressed:
+      case MachineRepresentation::kCagedPointer:  // Fall through.
 #ifdef V8_COMPRESS_POINTERS
         opcode = kS390_StoreCompressTagged;
         break;

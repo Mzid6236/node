@@ -3038,8 +3038,7 @@ TEST(DebugBreakInWrappedScript) {
   {
     v8::ScriptCompiler::Source script_source(v8_str(source));
     v8::Local<v8::Function> fun =
-        v8::ScriptCompiler::CompileFunctionInContext(
-            env.local(), &script_source, 0, nullptr, 0, nullptr)
+        v8::ScriptCompiler::CompileFunction(env.local(), &script_source)
             .ToLocalChecked();
     v8::Local<v8::Value> result =
         fun->Call(env.local(), env->Global(), 0, nullptr).ToLocalChecked();
@@ -3269,15 +3268,16 @@ TEST(DebugScriptLineEndsAreAscending) {
   v8::HandleScope scope(isolate);
 
   // Compile a test script.
-  v8::Local<v8::String> script = v8_str(isolate,
-                                        "function f() {\n"
-                                        "  debugger;\n"
-                                        "}\n");
+  v8::Local<v8::String> script_source = v8_str(isolate,
+                                               "function f() {\n"
+                                               "  debugger;\n"
+                                               "}\n");
 
   v8::ScriptOrigin origin1 = v8::ScriptOrigin(isolate, v8_str(isolate, "name"));
-  v8::Local<v8::Script> script1 =
-      v8::Script::Compile(env.local(), script, &origin1).ToLocalChecked();
-  USE(script1);
+  v8::Local<v8::Script> script =
+      v8::Script::Compile(env.local(), script_source, &origin1)
+          .ToLocalChecked();
+  USE(script);
 
   Handle<v8::internal::FixedArray> instances;
   {
@@ -3287,12 +3287,12 @@ TEST(DebugScriptLineEndsAreAscending) {
 
   CHECK_GT(instances->length(), 0);
   for (int i = 0; i < instances->length(); i++) {
-    Handle<v8::internal::Script> script = Handle<v8::internal::Script>(
+    Handle<v8::internal::Script> new_script = Handle<v8::internal::Script>(
         v8::internal::Script::cast(instances->get(i)), CcTest::i_isolate());
 
-    v8::internal::Script::InitLineEnds(CcTest::i_isolate(), script);
+    v8::internal::Script::InitLineEnds(CcTest::i_isolate(), new_script);
     v8::internal::FixedArray ends =
-        v8::internal::FixedArray::cast(script->line_ends());
+        v8::internal::FixedArray::cast(new_script->line_ends());
     CHECK_GT(ends.length(), 0);
 
     int prev_end = -1;
@@ -5372,8 +5372,7 @@ TEST(TerminateOnResumeAtException) {
 
     v8::ScriptCompiler::Source script_source(v8_str(source));
     v8::Local<v8::Function> foo =
-        v8::ScriptCompiler::CompileFunctionInContext(
-            env.local(), &script_source, 0, nullptr, 0, nullptr)
+        v8::ScriptCompiler::CompileFunction(env.local(), &script_source)
             .ToLocalChecked();
 
     v8::MaybeLocal<v8::Value> val =
@@ -5619,8 +5618,7 @@ TEST(TerminateOnResumeFromOtherThread) {
 
     v8::ScriptCompiler::Source script_source(v8_str(source));
     v8::Local<v8::Function> foo =
-        v8::ScriptCompiler::CompileFunctionInContext(
-            env.local(), &script_source, 0, nullptr, 0, nullptr)
+        v8::ScriptCompiler::CompileFunction(env.local(), &script_source)
             .ToLocalChecked();
 
     v8::MaybeLocal<v8::Value> val =
@@ -5674,8 +5672,7 @@ TEST(TerminateOnResumeAtInterruptFromOtherThread) {
 
     v8::ScriptCompiler::Source script_source(v8_str(source));
     v8::Local<v8::Function> foo =
-        v8::ScriptCompiler::CompileFunctionInContext(
-            env.local(), &script_source, 0, nullptr, 0, nullptr)
+        v8::ScriptCompiler::CompileFunction(env.local(), &script_source)
             .ToLocalChecked();
 
     CHECK(timeout_thread.Start());
@@ -5688,6 +5685,35 @@ TEST(TerminateOnResumeAtInterruptFromOtherThread) {
   // Exiting the TryCatch brought the isolate back to a state where JavaScript
   // can be executed.
   ExpectInt32("1 + 1", 2);
+  v8::debug::SetDebugDelegate(env->GetIsolate(), nullptr);
+  CheckDebuggerUnloaded();
+}
+
+namespace {
+
+class NoopDelegate : public v8::debug::DebugDelegate {};
+
+}  // namespace
+
+// Tests that the Isolate::Pop/Push leaves an empty stack for `await` when
+// the Debugger is active but the AsyncEventDelegate is not set.
+// Regression test for https://crbug.com/1225905
+TEST(AwaitCleansUpGlobalPromiseStack) {
+  LocalContext env;
+  v8::HandleScope scope(env->GetIsolate());
+
+  NoopDelegate delegate;
+  v8::debug::SetDebugDelegate(env->GetIsolate(), &delegate);
+  v8::debug::SetAsyncEventDelegate(env->GetIsolate(), nullptr);
+
+  v8::Local<v8::String> source = v8_str(
+      "(async () => {\n"
+      "  await Promise.resolve();\n"
+      "})();\n");
+  CompileRun(source);
+
+  CHECK_EQ(CcTest::i_isolate()->thread_local_top()->promise_on_stack_, nullptr);
+
   v8::debug::SetDebugDelegate(env->GetIsolate(), nullptr);
   CheckDebuggerUnloaded();
 }

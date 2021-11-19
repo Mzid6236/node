@@ -42,6 +42,7 @@
 #include <memory>
 #include <vector>
 
+#include "src/base/export-template.h"
 #include "src/codegen/assembler.h"
 #include "src/codegen/cpu-features.h"
 #include "src/codegen/label.h"
@@ -422,15 +423,6 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
     GetCode(isolate, desc, kNoSafepointTable, kNoHandlerTable);
   }
 
-  // This function is called when on-heap-compilation invariants are
-  // invalidated. For instance, when the assembler buffer grows or a GC happens
-  // between Code object allocation and Code object finalization.
-  void FixOnHeapReferences(bool update_embedded_objects = true);
-
-  // This function is called when we fallback from on-heap to off-heap
-  // compilation and patch on-heap references to handles.
-  void FixOnHeapReferencesToHandles();
-
   void FinalizeJumpOptimizationInfo();
 
   // Unused on this architecture.
@@ -486,7 +478,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   static constexpr byte kJzShortOpcode = kJccShortPrefix | zero;
 
   // VEX prefix encodings.
-  enum SIMDPrefix { kNone = 0x0, k66 = 0x1, kF3 = 0x2, kF2 = 0x3 };
+  enum SIMDPrefix { kNoPrefix = 0x0, k66 = 0x1, kF3 = 0x2, kF2 = 0x3 };
   enum VectorLength { kL128 = 0x0, kL256 = 0x4, kLIG = kL128, kLZ = kL128 };
   enum VexW { kW0 = 0x0, kW1 = 0x80, kWIG = kW0 };
   enum LeadingOpcode { k0F = 0x1, k0F38 = 0x2, k0F3A = 0x3 };
@@ -508,45 +500,20 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // - Instructions on 64-bit (quadword) operands/registers use 'q'.
   // - Instructions on operands/registers with pointer size use 'p'.
 
-#define DECLARE_INSTRUCTION(instruction)        \
-  template <class P1>                           \
-  void instruction##_tagged(P1 p1) {            \
-    emit_##instruction(p1, kTaggedSize);        \
-  }                                             \
-                                                \
-  template <class P1>                           \
-  void instruction##l(P1 p1) {                  \
-    emit_##instruction(p1, kInt32Size);         \
-  }                                             \
-                                                \
-  template <class P1>                           \
-  void instruction##q(P1 p1) {                  \
-    emit_##instruction(p1, kInt64Size);         \
-  }                                             \
-                                                \
-  template <class P1, class P2>                 \
-  void instruction##_tagged(P1 p1, P2 p2) {     \
-    emit_##instruction(p1, p2, kTaggedSize);    \
-  }                                             \
-                                                \
-  template <class P1, class P2>                 \
-  void instruction##l(P1 p1, P2 p2) {           \
-    emit_##instruction(p1, p2, kInt32Size);     \
-  }                                             \
-                                                \
-  template <class P1, class P2>                 \
-  void instruction##q(P1 p1, P2 p2) {           \
-    emit_##instruction(p1, p2, kInt64Size);     \
-  }                                             \
-                                                \
-  template <class P1, class P2, class P3>       \
-  void instruction##l(P1 p1, P2 p2, P3 p3) {    \
-    emit_##instruction(p1, p2, p3, kInt32Size); \
-  }                                             \
-                                                \
-  template <class P1, class P2, class P3>       \
-  void instruction##q(P1 p1, P2 p2, P3 p3) {    \
-    emit_##instruction(p1, p2, p3, kInt64Size); \
+#define DECLARE_INSTRUCTION(instruction)    \
+  template <typename... Ps>                 \
+  void instruction##_tagged(Ps... ps) {     \
+    emit_##instruction(ps..., kTaggedSize); \
+  }                                         \
+                                            \
+  template <typename... Ps>                 \
+  void instruction##l(Ps... ps) {           \
+    emit_##instruction(ps..., kInt32Size);  \
+  }                                         \
+                                            \
+  template <typename... Ps>                 \
+  void instruction##q(Ps... ps) {           \
+    emit_##instruction(ps..., kInt64Size);  \
   }
   ASSEMBLER_INSTRUCTION_LIST(DECLARE_INSTRUCTION)
 #undef DECLARE_INSTRUCTION
@@ -967,6 +934,10 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   void vinstr(byte op, XMMRegister dst, XMMRegister src1, Operand src2,
               SIMDPrefix pp, LeadingOpcode m, VexW w, CpuFeature feature = AVX);
 
+  template <typename Reg1, typename Reg2, typename Op>
+  void vinstr(byte op, Reg1 dst, Reg2 src1, Op src2, SIMDPrefix pp,
+              LeadingOpcode m, VexW w, CpuFeature feature = AVX2);
+
   // SSE instructions
   void sse_instr(XMMRegister dst, XMMRegister src, byte escape, byte opcode);
   void sse_instr(XMMRegister dst, Operand src, byte escape, byte opcode);
@@ -1024,7 +995,42 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
     vinstr(0x##opcode, dst, src1, src2, k##prefix, k##escape, kW0);          \
   }
 
-  SSE2_INSTRUCTION_LIST(DECLARE_SSE2_AVX_INSTRUCTION)
+#define DECLARE_SSE2_PD_AVX_INSTRUCTION(instruction, prefix, escape, opcode) \
+  DECLARE_SSE2_AVX_INSTRUCTION(instruction, prefix, escape, opcode)          \
+  void v##instruction(YMMRegister dst, YMMRegister src1, YMMRegister src2) { \
+    vinstr(0x##opcode, dst, src1, src2, k##prefix, k##escape, kW0, AVX);     \
+  }                                                                          \
+  void v##instruction(YMMRegister dst, YMMRegister src1, Operand src2) {     \
+    vinstr(0x##opcode, dst, src1, src2, k##prefix, k##escape, kW0, AVX);     \
+  }
+
+  SSE2_INSTRUCTION_LIST_PD(DECLARE_SSE2_PD_AVX_INSTRUCTION)
+#undef DECLARE_SSE2_PD_AVX_INSTRUCTION
+
+#define DECLARE_SSE2_PI_AVX_INSTRUCTION(instruction, prefix, escape, opcode) \
+  DECLARE_SSE2_AVX_INSTRUCTION(instruction, prefix, escape, opcode)          \
+  void v##instruction(YMMRegister dst, YMMRegister src1, YMMRegister src2) { \
+    vinstr(0x##opcode, dst, src1, src2, k##prefix, k##escape, kW0, AVX2);    \
+  }                                                                          \
+  void v##instruction(YMMRegister dst, YMMRegister src1, Operand src2) {     \
+    vinstr(0x##opcode, dst, src1, src2, k##prefix, k##escape, kW0, AVX2);    \
+  }
+
+  SSE2_INSTRUCTION_LIST_PI(DECLARE_SSE2_PI_AVX_INSTRUCTION)
+#undef DECLARE_SSE2_PI_AVX_INSTRUCTION
+
+#define DECLARE_SSE2_SHIFT_AVX_INSTRUCTION(instruction, prefix, escape,      \
+                                           opcode)                           \
+  DECLARE_SSE2_AVX_INSTRUCTION(instruction, prefix, escape, opcode)          \
+  void v##instruction(YMMRegister dst, YMMRegister src1, XMMRegister src2) { \
+    vinstr(0x##opcode, dst, src1, src2, k##prefix, k##escape, kW0, AVX2);    \
+  }                                                                          \
+  void v##instruction(YMMRegister dst, YMMRegister src1, Operand src2) {     \
+    vinstr(0x##opcode, dst, src1, src2, k##prefix, k##escape, kW0, AVX2);    \
+  }
+
+  SSE2_INSTRUCTION_LIST_SHIFT(DECLARE_SSE2_SHIFT_AVX_INSTRUCTION)
+#undef DECLARE_SSE2_SHIFT_AVX_INSTRUCTION
 #undef DECLARE_SSE2_AVX_INSTRUCTION
 
 #define DECLARE_SSE2_UNOP_AVX_INSTRUCTION(instruction, prefix, escape, opcode) \
@@ -1128,6 +1134,14 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   }                                                                           \
   void v##instruction(XMMRegister dst, XMMRegister src1, Operand src2) {      \
     vinstr(0x##opcode, dst, src1, src2, k##prefix, k##escape1##escape2, kW0); \
+  }                                                                           \
+  void v##instruction(YMMRegister dst, YMMRegister src1, YMMRegister src2) {  \
+    vinstr(0x##opcode, dst, src1, src2, k##prefix, k##escape1##escape2, kW0,  \
+           AVX2);                                                             \
+  }                                                                           \
+  void v##instruction(YMMRegister dst, YMMRegister src1, Operand src2) {      \
+    vinstr(0x##opcode, dst, src1, src2, k##prefix, k##escape1##escape2, kW0,  \
+           AVX2);                                                             \
   }
 
   SSSE3_INSTRUCTION_LIST(DECLARE_SSE34_AVX_INSTRUCTION)
@@ -1142,6 +1156,12 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   }                                                                          \
   void v##instruction(XMMRegister dst, Operand src) {                        \
     vinstr(0x##opcode, dst, xmm0, src, k##prefix, k##escape1##escape2, kW0); \
+  }                                                                          \
+  void v##instruction(YMMRegister dst, YMMRegister src) {                    \
+    vinstr(0x##opcode, dst, ymm0, src, k##prefix, k##escape1##escape2, kW0); \
+  }                                                                          \
+  void v##instruction(YMMRegister dst, Operand src) {                        \
+    vinstr(0x##opcode, dst, ymm0, src, k##prefix, k##escape1##escape2, kW0); \
   }
 
   SSSE3_UNOP_INSTRUCTION_LIST(DECLARE_SSSE3_UNOP_AVX_INSTRUCTION)
@@ -1315,9 +1335,14 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // AVX instruction
   void vmovddup(XMMRegister dst, XMMRegister src);
   void vmovddup(XMMRegister dst, Operand src);
+  void vmovddup(YMMRegister dst, YMMRegister src);
+  void vmovddup(YMMRegister dst, Operand src);
   void vmovshdup(XMMRegister dst, XMMRegister src);
+  void vmovshdup(YMMRegister dst, YMMRegister src);
   void vbroadcastss(XMMRegister dst, Operand src);
   void vbroadcastss(XMMRegister dst, XMMRegister src);
+  void vbroadcastss(YMMRegister dst, Operand src);
+  void vbroadcastss(YMMRegister dst, XMMRegister src);
 
   void fma_instr(byte op, XMMRegister dst, XMMRegister src1, XMMRegister src2,
                  VectorLength l, SIMDPrefix pp, LeadingOpcode m, VexW w);
@@ -1350,10 +1375,13 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   void vmovsd(Operand dst, XMMRegister src) { vsd(0x11, src, xmm0, dst); }
   void vmovdqa(XMMRegister dst, Operand src);
   void vmovdqa(XMMRegister dst, XMMRegister src);
+  void vmovdqa(YMMRegister dst, Operand src);
   void vmovdqa(YMMRegister dst, YMMRegister src);
   void vmovdqu(XMMRegister dst, Operand src);
   void vmovdqu(Operand dst, XMMRegister src);
   void vmovdqu(XMMRegister dst, XMMRegister src);
+  void vmovdqu(YMMRegister dst, Operand src);
+  void vmovdqu(Operand dst, YMMRegister src);
   void vmovdqu(YMMRegister dst, YMMRegister src);
 
   void vmovlps(XMMRegister dst, XMMRegister src1, Operand src2);
@@ -1394,15 +1422,16 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   SSE_BINOP_INSTRUCTION_LIST(AVX_SSE_BINOP)
 #undef AVX_SSE_BINOP
 
-#define AVX_3(instr, opcode, impl)                                  \
-  void instr(XMMRegister dst, XMMRegister src1, XMMRegister src2) { \
-    impl(opcode, dst, src1, src2);                                  \
-  }                                                                 \
-  void instr(XMMRegister dst, XMMRegister src1, Operand src2) {     \
-    impl(opcode, dst, src1, src2);                                  \
+#define AVX_3(instr, opcode, impl, SIMDRegister)                       \
+  void instr(SIMDRegister dst, SIMDRegister src1, SIMDRegister src2) { \
+    impl(opcode, dst, src1, src2);                                     \
+  }                                                                    \
+  void instr(SIMDRegister dst, SIMDRegister src1, Operand src2) {      \
+    impl(opcode, dst, src1, src2);                                     \
   }
 
-  AVX_3(vhaddps, 0x7c, vsd)
+  AVX_3(vhaddps, 0x7c, vsd, XMMRegister)
+  AVX_3(vhaddps, 0x7c, vsd, YMMRegister)
 
 #define AVX_SCALAR(instr, prefix, escape, opcode)                      \
   void v##instr(XMMRegister dst, XMMRegister src1, XMMRegister src2) { \
@@ -1427,10 +1456,10 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 #undef AVX_SSE2_SHIFT_IMM
 
   void vmovlhps(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
-    vinstr(0x16, dst, src1, src2, kNone, k0F, kWIG);
+    vinstr(0x16, dst, src1, src2, kNoPrefix, k0F, kWIG);
   }
   void vmovhlps(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
-    vinstr(0x12, dst, src1, src2, kNone, k0F, kWIG);
+    vinstr(0x12, dst, src1, src2, kNoPrefix, k0F, kWIG);
   }
   void vcvtdq2pd(XMMRegister dst, XMMRegister src) {
     vinstr(0xe6, dst, xmm0, src, kF3, k0F, kWIG);
@@ -1516,16 +1545,22 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
     vinstr(0x08, dst, xmm0, src, k66, k0F3A, kWIG);
     emit(static_cast<byte>(mode) | 0x8);  // Mask precision exception.
   }
+  void vroundps(YMMRegister dst, YMMRegister src, RoundingMode mode) {
+    vinstr(0x08, dst, ymm0, src, k66, k0F3A, kWIG, AVX);
+    emit(static_cast<byte>(mode) | 0x8);  // Mask precision exception.
+  }
   void vroundpd(XMMRegister dst, XMMRegister src, RoundingMode mode) {
     vinstr(0x09, dst, xmm0, src, k66, k0F3A, kWIG);
     emit(static_cast<byte>(mode) | 0x8);  // Mask precision exception.
   }
-
-  void vsd(byte op, XMMRegister dst, XMMRegister src1, XMMRegister src2) {
-    vinstr(op, dst, src1, src2, kF2, k0F, kWIG);
+  void vroundpd(YMMRegister dst, YMMRegister src, RoundingMode mode) {
+    vinstr(0x09, dst, ymm0, src, k66, k0F3A, kWIG, AVX);
+    emit(static_cast<byte>(mode) | 0x8);  // Mask precision exception.
   }
-  void vsd(byte op, XMMRegister dst, XMMRegister src1, Operand src2) {
-    vinstr(op, dst, src1, src2, kF2, k0F, kWIG);
+
+  template <typename Reg, typename Op>
+  void vsd(byte op, Reg dst, Reg src1, Op src2) {
+    vinstr(op, dst, src1, src2, kF2, k0F, kWIG, AVX);
   }
 
   void vmovss(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
@@ -1659,24 +1694,48 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
     vinstr(0x70, dst, xmm0, src, k66, k0F, kWIG);
     emit(imm8);
   }
+  void vpshufd(YMMRegister dst, YMMRegister src, uint8_t imm8) {
+    vinstr(0x70, dst, ymm0, src, k66, k0F, kWIG);
+    emit(imm8);
+  }
   void vpshufd(XMMRegister dst, Operand src, uint8_t imm8) {
     vinstr(0x70, dst, xmm0, src, k66, k0F, kWIG);
+    emit(imm8);
+  }
+  void vpshufd(YMMRegister dst, Operand src, uint8_t imm8) {
+    vinstr(0x70, dst, ymm0, src, k66, k0F, kWIG);
     emit(imm8);
   }
   void vpshuflw(XMMRegister dst, XMMRegister src, uint8_t imm8) {
     vinstr(0x70, dst, xmm0, src, kF2, k0F, kWIG);
     emit(imm8);
   }
+  void vpshuflw(YMMRegister dst, YMMRegister src, uint8_t imm8) {
+    vinstr(0x70, dst, ymm0, src, kF2, k0F, kWIG);
+    emit(imm8);
+  }
   void vpshuflw(XMMRegister dst, Operand src, uint8_t imm8) {
     vinstr(0x70, dst, xmm0, src, kF2, k0F, kWIG);
+    emit(imm8);
+  }
+  void vpshuflw(YMMRegister dst, Operand src, uint8_t imm8) {
+    vinstr(0x70, dst, ymm0, src, kF2, k0F, kWIG);
     emit(imm8);
   }
   void vpshufhw(XMMRegister dst, XMMRegister src, uint8_t imm8) {
     vinstr(0x70, dst, xmm0, src, kF3, k0F, kWIG);
     emit(imm8);
   }
+  void vpshufhw(YMMRegister dst, YMMRegister src, uint8_t imm8) {
+    vinstr(0x70, dst, ymm0, src, kF3, k0F, kWIG);
+    emit(imm8);
+  }
   void vpshufhw(XMMRegister dst, Operand src, uint8_t imm8) {
-    vinstr(0x70, dst, xmm0, src, kF2, k0F, kWIG);
+    vinstr(0x70, dst, xmm0, src, kF3, k0F, kWIG);
+    emit(imm8);
+  }
+  void vpshufhw(YMMRegister dst, Operand src, uint8_t imm8) {
+    vinstr(0x70, dst, ymm0, src, kF3, k0F, kWIG);
     emit(imm8);
   }
 
@@ -1685,7 +1744,16 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
     vinstr(0x0E, dst, src1, src2, k66, k0F3A, kWIG);
     emit(mask);
   }
+  void vpblendw(YMMRegister dst, YMMRegister src1, YMMRegister src2,
+                uint8_t mask) {
+    vinstr(0x0E, dst, src1, src2, k66, k0F3A, kWIG);
+    emit(mask);
+  }
   void vpblendw(XMMRegister dst, XMMRegister src1, Operand src2, uint8_t mask) {
+    vinstr(0x0E, dst, src1, src2, k66, k0F3A, kWIG);
+    emit(mask);
+  }
+  void vpblendw(YMMRegister dst, YMMRegister src1, Operand src2, uint8_t mask) {
     vinstr(0x0E, dst, src1, src2, k66, k0F3A, kWIG);
     emit(mask);
   }
@@ -1695,7 +1763,16 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
     vinstr(0x0F, dst, src1, src2, k66, k0F3A, kWIG);
     emit(imm8);
   }
+  void vpalignr(YMMRegister dst, YMMRegister src1, YMMRegister src2,
+                uint8_t imm8) {
+    vinstr(0x0F, dst, src1, src2, k66, k0F3A, kWIG);
+    emit(imm8);
+  }
   void vpalignr(XMMRegister dst, XMMRegister src1, Operand src2, uint8_t imm8) {
+    vinstr(0x0F, dst, src1, src2, k66, k0F3A, kWIG);
+    emit(imm8);
+  }
+  void vpalignr(YMMRegister dst, YMMRegister src1, Operand src2, uint8_t imm8) {
     vinstr(0x0F, dst, src1, src2, k66, k0F3A, kWIG);
     emit(imm8);
   }
@@ -1711,11 +1788,8 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 
   // AVX2 instructions
 #define AVX2_INSTRUCTION(instr, prefix, escape1, escape2, opcode)           \
-  void instr(XMMRegister dst, XMMRegister src) {                            \
-    vinstr(0x##opcode, dst, xmm0, src, k##prefix, k##escape1##escape2, kW0, \
-           AVX2);                                                           \
-  }                                                                         \
-  void instr(XMMRegister dst, Operand src) {                                \
+  template <typename Reg, typename Op>                                      \
+  void instr(Reg dst, Op src) {                                             \
     vinstr(0x##opcode, dst, xmm0, src, k##prefix, k##escape1##escape2, kW0, \
            AVX2);                                                           \
   }
@@ -1775,16 +1849,16 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   void popcntl(Register dst, Operand src);
 
   void bzhiq(Register dst, Register src1, Register src2) {
-    bmi2q(kNone, 0xf5, dst, src2, src1);
+    bmi2q(kNoPrefix, 0xf5, dst, src2, src1);
   }
   void bzhiq(Register dst, Operand src1, Register src2) {
-    bmi2q(kNone, 0xf5, dst, src2, src1);
+    bmi2q(kNoPrefix, 0xf5, dst, src2, src1);
   }
   void bzhil(Register dst, Register src1, Register src2) {
-    bmi2l(kNone, 0xf5, dst, src2, src1);
+    bmi2l(kNoPrefix, 0xf5, dst, src2, src1);
   }
   void bzhil(Register dst, Operand src1, Register src2) {
-    bmi2l(kNone, 0xf5, dst, src2, src1);
+    bmi2l(kNoPrefix, 0xf5, dst, src2, src1);
   }
   void mulxq(Register dst1, Register dst2, Register src) {
     bmi2q(kF2, 0xf6, dst1, dst2, src);
@@ -1886,13 +1960,6 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
     dq(data, rmode);
   }
   void dq(Label* label);
-
-#ifdef DEBUG
-  bool EmbeddedObjectMatches(int pc_offset, Handle<Object> object) {
-    return *reinterpret_cast<uint64_t*>(buffer_->start() + pc_offset) ==
-           (IsOnHeap() ? object->ptr() : object.address());
-  }
-#endif
 
   // Patch entries for partial constant pool.
   void PatchConstPool();
@@ -2400,6 +2467,27 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   std::unique_ptr<win64_unwindinfo::XdataEncoder> xdata_encoder_;
 #endif
 };
+
+extern template EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE)
+void Assembler::vinstr(byte op, YMMRegister dst, YMMRegister src1,
+                       YMMRegister src2, SIMDPrefix pp,
+                       LeadingOpcode m, VexW w, CpuFeature feature);
+extern template EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE)
+void Assembler::vinstr(byte op, YMMRegister dst, XMMRegister src1,
+                       XMMRegister src2, SIMDPrefix pp,
+                       LeadingOpcode m, VexW w, CpuFeature feature);
+extern template EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE)
+void Assembler::vinstr(byte op, YMMRegister dst, YMMRegister src1,
+                       Operand src2, SIMDPrefix pp, LeadingOpcode m,
+                       VexW w, CpuFeature feature);
+extern template EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE)
+void Assembler::vinstr(byte op, YMMRegister dst, YMMRegister src1,
+                       XMMRegister src2, SIMDPrefix pp,
+                       LeadingOpcode m, VexW w, CpuFeature feature);
+extern template EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE)
+void Assembler::vinstr(byte op, YMMRegister dst, XMMRegister src1,
+                       Operand src2, SIMDPrefix pp, LeadingOpcode m,
+                       VexW w, CpuFeature feature);
 
 // Helper class that ensures that there is enough space for generating
 // instructions and relocation information.  The constructor makes

@@ -57,7 +57,7 @@ const uint32_t kLessSignificantWordInDoublewordOffset = 4;
 namespace v8 {
 namespace internal {
 
-constexpr size_t kMaxPCRelativeCodeRangeInMB = 4096;
+constexpr size_t kMaxPCRelativeCodeRangeInMB = 4094;
 
 // -----------------------------------------------------------------------------
 // Registers and FPURegisters.
@@ -774,6 +774,7 @@ enum Opcode : uint32_t {
   RO_V_VMV_VI = OP_IVI | (VMV_FUNCT6 << kRvvFunct6Shift),
   RO_V_VMV_VV = OP_IVV | (VMV_FUNCT6 << kRvvFunct6Shift),
   RO_V_VMV_VX = OP_IVX | (VMV_FUNCT6 << kRvvFunct6Shift),
+  RO_V_VFMV_VF = OP_FVF | (VMV_FUNCT6 << kRvvFunct6Shift),
 
   RO_V_VMERGE_VI = RO_V_VMV_VI,
   RO_V_VMERGE_VV = RO_V_VMV_VV,
@@ -849,6 +850,12 @@ enum Opcode : uint32_t {
   RO_V_VWXUNARY0 = OP_MVV | (VWXUNARY0_FUNCT6 << kRvvFunct6Shift),
   RO_V_VRXUNARY0 = OP_MVX | (VRXUNARY0_FUNCT6 << kRvvFunct6Shift),
 
+  VXUNARY0_FUNCT6 = 0b010010,
+  RO_V_VXUNARY0 = OP_MVV | (VXUNARY0_FUNCT6 << kRvvFunct6Shift),
+
+  VWFUNARY0_FUNCT6 = 0b010000,
+  RO_V_VFMV_FS = OP_FVV | (VWFUNARY0_FUNCT6 << kRvvFunct6Shift),
+
   VREDMAXU_FUNCT6 = 0b000110,
   RO_V_VREDMAXU = OP_MVV | (VREDMAXU_FUNCT6 << kRvvFunct6Shift),
   VREDMAX_FUNCT6 = 0b000111,
@@ -858,6 +865,119 @@ enum Opcode : uint32_t {
   RO_V_VREDMINU = OP_MVV | (VREDMINU_FUNCT6 << kRvvFunct6Shift),
   VREDMIN_FUNCT6 = 0b000101,
   RO_V_VREDMIN = OP_MVV | (VREDMIN_FUNCT6 << kRvvFunct6Shift),
+
+  VFUNARY0_FUNCT6 = 0b010010,
+  RO_V_VFUNARY0 = OP_FVV | (VFUNARY0_FUNCT6 << kRvvFunct6Shift),
+  VFUNARY1_FUNCT6 = 0b010011,
+  RO_V_VFUNARY1 = OP_FVV | (VFUNARY1_FUNCT6 << kRvvFunct6Shift),
+
+  VFCVT_XU_F_V = 0b00000,
+  VFCVT_X_F_V = 0b00001,
+  VFCVT_F_XU_V = 0b00010,
+  VFCVT_F_X_V = 0b00011,
+  VFNCVT_F_F_W = 0b10100,
+
+  VFCLASS_V = 0b10000,
+
+  VFADD_FUNCT6 = 0b000000,
+  RO_V_VFADD_VV = OP_FVV | (VFADD_FUNCT6 << kRvvFunct6Shift),
+  RO_V_VFADD_VF = OP_FVF | (VFADD_FUNCT6 << kRvvFunct6Shift),
+
+  VFSUB_FUNCT6 = 0b000010,
+  RO_V_VFSUB_VV = OP_FVV | (VFSUB_FUNCT6 << kRvvFunct6Shift),
+  RO_V_VFSUB_VF = OP_FVF | (VFSUB_FUNCT6 << kRvvFunct6Shift),
+
+  VFDIV_FUNCT6 = 0b100000,
+  RO_V_VFDIV_VV = OP_FVV | (VFDIV_FUNCT6 << kRvvFunct6Shift),
+  RO_V_VFDIV_VF = OP_FVF | (VFDIV_FUNCT6 << kRvvFunct6Shift),
+
+  VFMUL_FUNCT6 = 0b100100,
+  RO_V_VFMUL_VV = OP_FVV | (VFMUL_FUNCT6 << kRvvFunct6Shift),
+  RO_V_VFMUL_VF = OP_FVF | (VFMUL_FUNCT6 << kRvvFunct6Shift),
+
+  VMFEQ_FUNCT6 = 0b011000,
+  RO_V_VMFEQ_VV = OP_FVV | (VMFEQ_FUNCT6 << kRvvFunct6Shift),
+  RO_V_VMFEQ_VF = OP_FVF | (VMFEQ_FUNCT6 << kRvvFunct6Shift),
+
+  VMFNE_FUNCT6 = 0b011100,
+  RO_V_VMFNE_VV = OP_FVV | (VMFNE_FUNCT6 << kRvvFunct6Shift),
+  RO_V_VMFNE_VF = OP_FVF | (VMFNE_FUNCT6 << kRvvFunct6Shift),
+
+  VMFLT_FUNCT6 = 0b011011,
+  RO_V_VMFLT_VV = OP_FVV | (VMFLT_FUNCT6 << kRvvFunct6Shift),
+  RO_V_VMFLT_VF = OP_FVF | (VMFLT_FUNCT6 << kRvvFunct6Shift),
+
+  VMFLE_FUNCT6 = 0b011001,
+  RO_V_VMFLE_VV = OP_FVV | (VMFLE_FUNCT6 << kRvvFunct6Shift),
+  RO_V_VMFLE_VF = OP_FVF | (VMFLE_FUNCT6 << kRvvFunct6Shift),
+
+  VMFGE_FUNCT6 = 0b011111,
+  RO_V_VMFGE_VF = OP_FVF | (VMFGE_FUNCT6 << kRvvFunct6Shift),
+
+  VMFGT_FUNCT6 = 0b011101,
+  RO_V_VMFGT_VF = OP_FVF | (VMFGT_FUNCT6 << kRvvFunct6Shift),
+
+  VFMAX_FUNCT6 = 0b000110,
+  RO_V_VFMAX_VV = OP_FVV | (VFMAX_FUNCT6 << kRvvFunct6Shift),
+  RO_V_VFMAX_VF = OP_FVF | (VFMAX_FUNCT6 << kRvvFunct6Shift),
+
+  VFMIN_FUNCT6 = 0b000100,
+  RO_V_VFMIN_VV = OP_FVV | (VFMIN_FUNCT6 << kRvvFunct6Shift),
+  RO_V_VFMIN_VF = OP_FVF | (VFMIN_FUNCT6 << kRvvFunct6Shift),
+
+  VFSGNJ_FUNCT6 = 0b001000,
+  RO_V_VFSGNJ_VV = OP_FVV | (VFSGNJ_FUNCT6 << kRvvFunct6Shift),
+  RO_V_VFSGNJ_VF = OP_FVF | (VFSGNJ_FUNCT6 << kRvvFunct6Shift),
+
+  VFSGNJN_FUNCT6 = 0b001001,
+  RO_V_VFSGNJN_VV = OP_FVV | (VFSGNJN_FUNCT6 << kRvvFunct6Shift),
+  RO_V_VFSGNJN_VF = OP_FVF | (VFSGNJN_FUNCT6 << kRvvFunct6Shift),
+
+  VFSGNJX_FUNCT6 = 0b001010,
+  RO_V_VFSGNJX_VV = OP_FVV | (VFSGNJX_FUNCT6 << kRvvFunct6Shift),
+  RO_V_VFSGNJX_VF = OP_FVF | (VFSGNJX_FUNCT6 << kRvvFunct6Shift),
+
+  VFMADD_FUNCT6 = 0b101000,
+  RO_V_VFMADD_VV = OP_FVV | (VFMADD_FUNCT6 << kRvvFunct6Shift),
+  RO_V_VFMADD_VF = OP_FVF | (VFMADD_FUNCT6 << kRvvFunct6Shift),
+
+  VFNMADD_FUNCT6 = 0b101001,
+  RO_V_VFNMADD_VV = OP_FVV | (VFNMADD_FUNCT6 << kRvvFunct6Shift),
+  RO_V_VFNMADD_VF = OP_FVF | (VFNMADD_FUNCT6 << kRvvFunct6Shift),
+
+  VFMSUB_FUNCT6 = 0b101010,
+  RO_V_VFMSUB_VV = OP_FVV | (VFMSUB_FUNCT6 << kRvvFunct6Shift),
+  RO_V_VFMSUB_VF = OP_FVF | (VFMSUB_FUNCT6 << kRvvFunct6Shift),
+
+  VFNMSUB_FUNCT6 = 0b101011,
+  RO_V_VFNMSUB_VV = OP_FVV | (VFNMSUB_FUNCT6 << kRvvFunct6Shift),
+  RO_V_VFNMSUB_VF = OP_FVF | (VFNMSUB_FUNCT6 << kRvvFunct6Shift),
+
+  VFMACC_FUNCT6 = 0b101100,
+  RO_V_VFMACC_VV = OP_FVV | (VFMACC_FUNCT6 << kRvvFunct6Shift),
+  RO_V_VFMACC_VF = OP_FVF | (VFMACC_FUNCT6 << kRvvFunct6Shift),
+
+  VFNMACC_FUNCT6 = 0b101101,
+  RO_V_VFNMACC_VV = OP_FVV | (VFNMACC_FUNCT6 << kRvvFunct6Shift),
+  RO_V_VFNMACC_VF = OP_FVF | (VFNMACC_FUNCT6 << kRvvFunct6Shift),
+
+  VFMSAC_FUNCT6 = 0b101110,
+  RO_V_VFMSAC_VV = OP_FVV | (VFMSAC_FUNCT6 << kRvvFunct6Shift),
+  RO_V_VFMSAC_VF = OP_FVF | (VFMSAC_FUNCT6 << kRvvFunct6Shift),
+
+  VFNMSAC_FUNCT6 = 0b101111,
+  RO_V_VFNMSAC_VV = OP_FVV | (VFNMSAC_FUNCT6 << kRvvFunct6Shift),
+  RO_V_VFNMSAC_VF = OP_FVF | (VFNMSAC_FUNCT6 << kRvvFunct6Shift),
+
+  VNCLIP_FUNCT6 = 0b101111,
+  RO_V_VNCLIP_WV = OP_IVV | (VNCLIP_FUNCT6 << kRvvFunct6Shift),
+  RO_V_VNCLIP_WX = OP_IVX | (VNCLIP_FUNCT6 << kRvvFunct6Shift),
+  RO_V_VNCLIP_WI = OP_IVI | (VNCLIP_FUNCT6 << kRvvFunct6Shift),
+
+  VNCLIPU_FUNCT6 = 0b101110,
+  RO_V_VNCLIPU_WV = OP_IVV | (VNCLIPU_FUNCT6 << kRvvFunct6Shift),
+  RO_V_VNCLIPU_WX = OP_IVX | (VNCLIPU_FUNCT6 << kRvvFunct6Shift),
+  RO_V_VNCLIPU_WI = OP_IVI | (VNCLIPU_FUNCT6 << kRvvFunct6Shift),
 };
 
 // ----- Emulated conditions.
@@ -990,6 +1110,13 @@ enum MemoryOdering {
   PSW = 0b0001,  // PW or SW
   PSIORW = PSI | PSO | PSR | PSW
 };
+
+const int kFloat32ExponentBias = 127;
+const int kFloat32MantissaBits = 23;
+const int kFloat32ExponentBits = 8;
+const int kFloat64ExponentBias = 1023;
+const int kFloat64MantissaBits = 52;
+const int kFloat64ExponentBits = 11;
 
 enum FClassFlag {
   kNegativeInfinity = 1,

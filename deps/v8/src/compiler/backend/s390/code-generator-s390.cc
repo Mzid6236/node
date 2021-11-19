@@ -1174,8 +1174,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     }
     case kArchPrepareCallCFunction: {
-      int const num_parameters = MiscField::decode(instr->opcode());
-      __ PrepareCallCFunction(num_parameters, kScratchReg);
+      int const num_gp_parameters = ParamField::decode(instr->opcode());
+      int const num_fp_parameters = FPParamField::decode(instr->opcode());
+      __ PrepareCallCFunction(num_gp_parameters + num_fp_parameters,
+                              kScratchReg);
       // Frame alignment requires using FP-relative frame addressing.
       frame_access_state()->SetFrameAccessToFP();
       break;
@@ -1211,7 +1213,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       AssemblePrepareTailCall();
       break;
     case kArchCallCFunction: {
-      int const num_parameters = MiscField::decode(instr->opcode());
+      int const num_gp_parameters = ParamField::decode(instr->opcode());
+      int const num_fp_parameters = FPParamField::decode(instr->opcode());
       Label return_location;
       // Put the return address in a stack slot.
 #if V8_ENABLE_WEBASSEMBLY
@@ -1224,10 +1227,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
 #endif  // V8_ENABLE_WEBASSEMBLY
       if (instr->InputAt(0)->IsImmediate()) {
         ExternalReference ref = i.InputExternalReference(0);
-        __ CallCFunction(ref, num_parameters);
+        __ CallCFunction(ref, num_gp_parameters, num_fp_parameters);
       } else {
         Register func = i.InputRegister(0);
-        __ CallCFunction(func, num_parameters);
+        __ CallCFunction(func, num_gp_parameters, num_fp_parameters);
       }
       __ bind(&return_location);
 #if V8_ENABLE_WEBASSEMBLY
@@ -1263,13 +1266,13 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArchTableSwitch:
       AssembleArchTableSwitch(instr);
       break;
-    case kArchAbortCSAAssert:
+    case kArchAbortCSADcheck:
       DCHECK(i.InputRegister(0) == r3);
       {
         // We don't actually want to generate a pile of code for this, so just
         // claim there is a stack frame, without generating one.
-        FrameScope scope(tasm(), StackFrame::NONE);
-        __ Call(isolate()->builtins()->code_handle(Builtin::kAbortCSAAssert),
+        FrameScope scope(tasm(), StackFrame::NO_FRAME_TYPE);
+        __ Call(isolate()->builtins()->code_handle(Builtin::kAbortCSADcheck),
                 RelocInfo::CODE_TARGET);
       }
       __ stop();
@@ -3741,25 +3744,14 @@ void CodeGenerator::AssembleConstructFrame() {
       // efficient intialization of the constant pool pointer register).
       __ StubPrologue(type);
 #if V8_ENABLE_WEBASSEMBLY
-      if (call_descriptor->IsWasmFunctionCall()) {
+      if (call_descriptor->IsWasmFunctionCall() ||
+          call_descriptor->IsWasmImportWrapper() ||
+          call_descriptor->IsWasmCapiFunction()) {
         __ Push(kWasmInstanceRegister);
-      } else if (call_descriptor->IsWasmImportWrapper() ||
-                 call_descriptor->IsWasmCapiFunction()) {
-        // Wasm import wrappers are passed a tuple in the place of the instance.
-        // Unpack the tuple into the instance and the target callable.
-        // This must be done here in the codegen because it cannot be expressed
-        // properly in the graph.
-        __ LoadTaggedPointerField(
-            kJSFunctionRegister,
-            FieldMemOperand(kWasmInstanceRegister, Tuple2::kValue2Offset), r0);
-        __ LoadTaggedPointerField(
-            kWasmInstanceRegister,
-            FieldMemOperand(kWasmInstanceRegister, Tuple2::kValue1Offset), r0);
-        __ Push(kWasmInstanceRegister);
-        if (call_descriptor->IsWasmCapiFunction()) {
-          // Reserve space for saving the PC later.
-          __ lay(sp, MemOperand(sp, -kSystemPointerSize));
-        }
+      }
+      if (call_descriptor->IsWasmCapiFunction()) {
+        // Reserve space for saving the PC later.
+        __ lay(sp, MemOperand(sp, -kSystemPointerSize));
       }
 #endif  // V8_ENABLE_WEBASSEMBLY
     }
@@ -3922,15 +3914,25 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
     // max(argc_reg, parameter_slots-1), and the receiver is added in
     // DropArguments().
     if (parameter_slots > 1) {
-      const int parameter_slots_without_receiver = parameter_slots - 1;
-      Label skip;
-      __ CmpS64(argc_reg, Operand(parameter_slots_without_receiver));
-      __ bgt(&skip);
-      __ mov(argc_reg, Operand(parameter_slots_without_receiver));
-      __ bind(&skip);
+      if (kJSArgcIncludesReceiver) {
+        Label skip;
+        __ CmpS64(argc_reg, Operand(parameter_slots));
+        __ bgt(&skip);
+        __ mov(argc_reg, Operand(parameter_slots));
+        __ bind(&skip);
+      } else {
+        const int parameter_slots_without_receiver = parameter_slots - 1;
+        Label skip;
+        __ CmpS64(argc_reg, Operand(parameter_slots_without_receiver));
+        __ bgt(&skip);
+        __ mov(argc_reg, Operand(parameter_slots_without_receiver));
+        __ bind(&skip);
+      }
     }
     __ DropArguments(argc_reg, TurboAssembler::kCountIsInteger,
-                     TurboAssembler::kCountExcludesReceiver);
+                     kJSArgcIncludesReceiver
+                         ? TurboAssembler::kCountIncludesReceiver
+                         : TurboAssembler::kCountExcludesReceiver);
   } else if (additional_pop_count->IsImmediate()) {
     int additional_count = g.ToConstant(additional_pop_count).ToInt32();
     __ Drop(parameter_slots + additional_count);

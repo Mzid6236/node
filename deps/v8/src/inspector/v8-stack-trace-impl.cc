@@ -168,16 +168,15 @@ std::unique_ptr<StringBuffer> V8StackTraceId::ToString() {
   return StringBufferFrom(std::move(json));
 }
 
-StackFrame::StackFrame(v8::Isolate* isolate, v8::Local<v8::StackFrame> v8Frame)
-    : m_functionName(
-          toProtocolString(isolate, v8::debug::GetFunctionDebugName(v8Frame))),
-      m_scriptId(v8Frame->GetScriptId()),
-      m_sourceURL(
-          toProtocolString(isolate, v8Frame->GetScriptNameOrSourceURL())),
-      m_lineNumber(v8Frame->GetLineNumber() - 1),
-      m_columnNumber(v8Frame->GetColumn() - 1),
-      m_hasSourceURLComment(v8Frame->GetScriptName() !=
-                            v8Frame->GetScriptNameOrSourceURL()) {
+StackFrame::StackFrame(String16&& functionName, int scriptId,
+                       String16&& sourceURL, int lineNumber, int columnNumber,
+                       bool hasSourceURLComment)
+    : m_functionName(std::move(functionName)),
+      m_scriptId(scriptId),
+      m_sourceURL(std::move(sourceURL)),
+      m_lineNumber(lineNumber),
+      m_columnNumber(columnNumber),
+      m_hasSourceURLComment(hasSourceURLComment) {
   DCHECK_NE(v8::Message::kNoLineNumberInfo, m_lineNumber + 1);
   DCHECK_NE(v8::Message::kNoColumnInfo, m_columnNumber + 1);
 }
@@ -389,7 +388,6 @@ void V8StackTraceImpl::StackFrameIterator::next() {
   while (m_currentIt == m_currentEnd && m_parent) {
     const std::vector<std::shared_ptr<StackFrame>>& frames = m_parent->frames();
     m_currentIt = frames.begin();
-    if (m_parent->description() == "async function") ++m_currentIt;
     m_currentEnd = frames.end();
     m_parent = m_parent->parent().lock().get();
   }
@@ -405,7 +403,8 @@ StackFrame* V8StackTraceImpl::StackFrameIterator::frame() {
 
 // static
 std::shared_ptr<AsyncStackTrace> AsyncStackTrace::capture(
-    V8Debugger* debugger, const String16& description, int maxStackSize) {
+    V8Debugger* debugger, const String16& description, int maxStackSize,
+    bool skipTopFrame) {
   DCHECK(debugger);
 
   TRACE_EVENT1(TRACE_DISABLED_BY_DEFAULT("v8.stack_trace"),
@@ -419,6 +418,9 @@ std::shared_ptr<AsyncStackTrace> AsyncStackTrace::capture(
     v8::Local<v8::StackTrace> v8StackTrace = v8::StackTrace::CurrentStackTrace(
         isolate, maxStackSize, stackTraceOptions);
     frames = toFramesVector(debugger, v8StackTrace, maxStackSize);
+    if (skipTopFrame && !frames.empty()) {
+      frames.erase(frames.begin());
+    }
   }
 
   std::shared_ptr<AsyncStackTrace> asyncParent;

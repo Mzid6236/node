@@ -77,7 +77,7 @@
   # Enable once serializing a running isolate is fully implemented.
   'serialize-deserialize-now': [SKIP],
 
-  # BUG(v8:9506): times out.
+  # BUG(v8:9506): slow tests.
   'wasm/shared-memory-worker-explicit-gc-stress': [PASS, SLOW],
   'wasm/shared-memory-worker-gc-stress': [PASS, SLOW],
 
@@ -212,10 +212,8 @@
   'regress/regress-crbug-1191886': [PASS, HEAVY],
   'wasm/externref-globals': [PASS, HEAVY],
 
-  # BUG(v8:12173).
-  'compiler/call-with-arraylike-or-spread-7': [PASS, FAIL],
-  'ic-migrated-map-add-when-monomorphic': [PASS, FAIL],
-  'es6/map-constructor-entry-side-effect2': [PASS, FAIL]
+  # Enable when stack-switching supports GC.
+  'wasm/stack-switching': [SKIP],
 }],  # ALWAYS
 
 ##############################################################################
@@ -423,16 +421,18 @@
 ['no_i18n', {
   # Case-insensitive unicode regexp relies on case mapping provided by ICU.
   'es6/unicode-regexp-ignore-case': [FAIL],
-  'regress/regress-5036': [FAIL],
   'es7/regexp-ui-word': [FAIL],
+  'regress/regress-5036': [FAIL],
 
   # Desugaring regexp property class relies on ICU. Anything goes as long as we
   # don't crash.
   'harmony/regexp-property-*': [PASS,FAIL],
+  'regress/regress-1262423': [PASS,FAIL],
   'regress/regress-793588': [PASS,FAIL],
 
-  # noi18n build cannot parse characters in supplementary plane.
+  # The noi18n build cannot parse characters in supplementary plane.
   'harmony/regexp-named-captures': [FAIL],
+  'regress/regress-v8-10384': [FAIL],
 
   # noi18n cannot turn on ICU backend for Date. Anything goes as long as we
   # don't crash.
@@ -446,6 +446,9 @@
 
   # noi18n is required for Intl
   'regress/regress-crbug-1052647': [PASS,FAIL],
+
+  # Temporal intl tests won't work in no_i18n
+  'temporal/function-exist': [FAIL],
 }],  # 'no_i18n'
 
 ##############################################################################
@@ -848,7 +851,6 @@
   'regress/regress-490': [SKIP],
   'regress/regress-create-exception': [SKIP],
   'regress/regress-3247124': [SKIP],
-  'compiler/regress-1226988': [SKIP],
 
   # Requires bigger stack size in the Genesis and if stack size is increased,
   # the test requires too much time to run.  However, the problem test covers
@@ -876,9 +878,6 @@
   'regress/regress-1138075': [SKIP],
   'regress/regress-1138611': [SKIP],
 
-  # Some atomic functions are not yet implemented
-  'regress/wasm/regress-1196837': [SKIP],
-
   # SIMD not be implemented
   'regress/wasm/regress-1054466': [SKIP],
   'regress/wasm/regress-1065599': [SKIP],
@@ -897,6 +896,7 @@
   'regress/wasm/regress-1187831': [SKIP],
   'regress/wasm/regress-1199662': [SKIP],
   'regress/wasm/regress-1231950': [SKIP],
+  'regress/wasm/regress-1264462': [SKIP],
   'regress/regress-1172797': [SKIP],
   'regress/wasm/regress-1179025': [SKIP],
   'wasm/multi-value-simd': [SKIP],
@@ -1076,14 +1076,19 @@
   'baseline/test-osr': [SKIP],
 
   # BUG(v8:11826) Skipped until we remove flakes on NumFuzz.
-  'baseline/flush-only-baseline-code': [SKIP],
-  'baseline/flush-baseline-code': [SKIP],
   'regress/wasm/regress-1231950': [SKIP],
 
   # BUG(v8:12013) Skipped until we remove flakes on NumFuzz.
   'compiler/concurrent-inlining-1': [SKIP],
   'compiler/inlined-call-polymorphic': [SKIP],
 }],  # 'gc_fuzzer'
+
+##############################################################################
+# Skip for both deopt_fuzzer and gc_fuzzer
+['deopt_fuzzer or gc_fuzzer', {
+  # BUG(v8:12185).
+  'wasm/wasm-struct-js-interop': [SKIP],
+}], # deopt_fuzzer or gc_fuzzer
 
 ##############################################################################
 ['endurance_fuzzer', {
@@ -1162,6 +1167,7 @@
 ['system == aix', {
   # stack overflow
   'regress/regress-crbug-178790': [PASS, ['mode == debug', SKIP]],
+  'regress/regress-1067270': [PASS, ['mode == debug', SKIP]],
   # PASE environment currently ships with no tzdata database
   'tzoffset-transition-new-york-noi18n': [SKIP],
   'tzoffset-seoul-noi18n': [SKIP],
@@ -1284,17 +1290,17 @@
 }], # arch != x64 or deopt_fuzzer
 
 ##############################################################################
-# Liftoff is currently only sufficiently implemented on x64, ia32, arm64 and
-# arm.
-# TODO(clemensb): Implement on all other platforms (crbug.com/v8/6600).
-['arch not in (x64, ia32, arm64, arm)', {
+# Skip Liftoff tests on platforms that do not fully implement Liftoff.
+['arch not in (x64, ia32, arm64, arm, s390x, ppc64)', {
   'wasm/liftoff': [SKIP],
   'wasm/liftoff-debug': [SKIP],
   'wasm/tier-up-testing-flag': [SKIP],
   'wasm/tier-down-to-liftoff': [SKIP],
   'wasm/wasm-dynamic-tiering': [SKIP],
   'wasm/test-partial-serialization': [SKIP],
-}], # arch not in (x64, ia32, arm64, arm)
+  'regress/wasm/regress-1248024': [SKIP],
+  'regress/wasm/regress-1251465': [SKIP],
+}], # arch not in (x64, ia32, arm64, arm, s390x)
 
 ##############################################################################
 ['system != linux or virtual_memory_cage == True', {
@@ -1376,6 +1382,7 @@
   # Investigate (IsScript).
   'harmony/import-from-compilation-errored': [SKIP],
   'harmony/private-fields-special-object': [SKIP],
+  'regress/regress-676025': [SKIP],
   # Skip, since import errors since they refer to the script via debug symbols
   'harmony/import-from-instantiation-errored': [SKIP],
   # The entire snapshotting code assumes that the snapshot size fits
@@ -1438,6 +1445,7 @@
   'wasm/liftoff-simd-params': [SKIP],
   'wasm/multi-value-simd': [SKIP],
   'wasm/simd-*': [SKIP],
+  'regress/wasm/regress-9447': [SKIP],
   'regress/wasm/regress-10309': [SKIP],
   'regress/wasm/regress-10831': [SKIP],
   'regress/wasm/regress-1054466': [SKIP],
@@ -1450,14 +1458,22 @@
   'regress/wasm/regress-1124885': [SKIP],
   'regress/wasm/regress-1132461': [SKIP],
   'regress/wasm/regress-1161555': [SKIP],
+  'regress/wasm/regress-1161654': [SKIP],
   'regress/wasm/regress-1161954': [SKIP],
   'regress/wasm/regress-1165966': [SKIP],
   'regress/wasm/regress-1187831': [SKIP],
   'regress/wasm/regress-1199662': [SKIP],
   'regress/wasm/regress-1231950': [SKIP],
+  'regress/wasm/regress-1237024': [SKIP],
   'regress/wasm/regress-1242300': [SKIP],
   'regress/wasm/regress-1242689': [SKIP],
+  'regress/wasm/regress-1264462': [SKIP],
 }],  # no_simd_hardware == True
+
+##############################################################################
+['no_simd_hardware == False', {
+  'regress/wasm/regress-1254675': [SKIP],
+}],  # no_simd_hardware == False
 
 ##############################################################################
 # TODO(v8:11421): Port baseline compiler to other architectures.
@@ -1476,13 +1492,6 @@
 ['variant == experimental_regexp', {
   'regress/regress-779407': [SKIP],
 }],  # variant == experimental_regexp
-
-##############################################################################
-['variant == instruction_scheduling or variant == stress_instruction_scheduling', {
-  # BUG(12018): These tests currently fail with --turbo-instruction-scheduling.
-  'regress/wasm/regress-1231950': [SKIP],
-  'regress/wasm/regress-1242300': [SKIP],
-}],  # variant == instruction_scheduling or variant == stress_instruction_scheduling
 
 ################################################################################
 ['single_generation', {
@@ -1647,6 +1656,66 @@
 ['arch != x64', {
   # Tests that include types only supported on x64.
   'compiler/fast-api-sequences-x64': [SKIP],
+  # Stack switching is only supported on x64.
+  'wasm/stack-switching': [SKIP],
 }],  # arch != x64
+
+##############################################################################
+# Skip failing tests in google3
+['variant == google3_noicu or variant == google3_icu', {
+  # timeouts on Google3:
+  'compiler/division-by-constant': [PASS, SLOW],
+  'compiler/expression-trees': [SKIP],
+  'harmony/sharedarraybuffer-worker-gc-stress': [SKIP],
+  'math-floor-part1': [SKIP],
+  'compiler/regress-1125145': [SKIP],
+
+  # TODO(victorgomes):
+  'es6/unicode-regexp-ignore-case-noi18n': [SKIP],
+  'wasm/bulk-memory': [SKIP],
+
+  # TODO(b/201757247):
+  'array-constructor-feedback': [FAIL],
+  'const-dict-tracking': [FAIL],
+  'compiler/deopt-pretenure': [FAIL],
+  'compiler/fast-api-sequences-x64': [FAIL],
+  'compiler/native-context-specialization-hole-check': [FAIL],
+  'compiler/test-literal-map-migration': [FAIL],
+  'regress/regress-4121': [FAIL],
+  'regress/regress-trap-allocation-memento': [FAIL],
+}], # variant == google3_nociu or variant == google3_icu
+
+# Specific failures for no_icu builds
+['variant == google3_noicu', {
+  'es6/unicode-regexp-ignore-case': [FAIL],
+  'es7/regexp-ui-word': [FAIL],
+  'harmony/regexp-named-captures': [FAIL],
+  'harmony/regexp-property-binary': [FAIL],
+  'harmony/regexp-property-char-class': [FAIL],
+  'harmony/regexp-property-enumerated': [FAIL],
+  'harmony/regexp-property-exact-match': [FAIL],
+  'harmony/regexp-property-general-category': [FAIL],
+  'harmony/regexp-property-lu-ui0': [FAIL],
+  'harmony/regexp-property-lu-ui1': [FAIL],
+  'harmony/regexp-property-lu-ui2': [FAIL],
+  'harmony/regexp-property-lu-ui3': [FAIL],
+  'harmony/regexp-property-lu-ui4': [FAIL],
+  'harmony/regexp-property-lu-ui5': [FAIL],
+  'harmony/regexp-property-lu-ui6': [FAIL],
+  'harmony/regexp-property-lu-ui7': [FAIL],
+  'harmony/regexp-property-lu-ui8': [FAIL],
+  'harmony/regexp-property-lu-ui9': [FAIL],
+  'harmony/regexp-property-lu-ui': [FAIL],
+  'harmony/regexp-property-script-extensions': [FAIL],
+  'harmony/regexp-property-scripts': [FAIL],
+  'harmony/regexp-property-special': [FAIL],
+  'icu-date-lord-howe': [FAIL],
+  'icu-date-to-string': [FAIL],
+  'regress/regress-5036': [FAIL],
+  'regress/regress-793588': [FAIL],
+  'tzoffset-transition-apia': [FAIL],
+  'tzoffset-transition-lord-howe': [FAIL],
+  'tzoffset-transition-moscow': [FAIL],
+}], # variant == google3_nociu
 
 ]

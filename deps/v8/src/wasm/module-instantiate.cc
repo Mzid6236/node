@@ -6,6 +6,7 @@
 
 #include "src/api/api.h"
 #include "src/asmjs/asm-js.h"
+#include "src/base/atomicops.h"
 #include "src/base/platform/wrappers.h"
 #include "src/logging/counters-scopes.h"
 #include "src/logging/metrics.h"
@@ -65,6 +66,7 @@ class CompileImportWrapperJob final : public JobTask {
   }
 
   void Run(JobDelegate* delegate) override {
+    TRACE_EVENT0("v8.wasm", "wasm.CompileImportWrapperJob.Run");
     while (base::Optional<WasmImportWrapperCache::CacheKey> key =
                queue_->pop()) {
       // TODO(wasm): Batch code publishing, to avoid repeated locking and
@@ -192,6 +194,41 @@ Handle<Map> CreateArrayMap(Isolate* isolate, const WasmModule* module,
   WasmArray::EncodeElementSizeInMap(type->element_type().element_size_bytes(),
                                     *map);
   return map;
+}
+
+void CreateMapForType(Isolate* isolate, const WasmModule* module,
+                      int type_index, Handle<WasmInstanceObject> instance,
+                      Handle<FixedArray> maps) {
+  // Recursive calls for supertypes may already have created this map.
+  if (maps->get(type_index).IsMap()) return;
+  Handle<Map> rtt_parent;
+  // If the type with {type_index} has an explicit supertype, make sure the
+  // map for that supertype is created first, so that the supertypes list
+  // that's cached on every RTT can be set up correctly.
+  uint32_t supertype = module->supertype(type_index);
+  if (supertype != kNoSuperType && supertype != kGenericSuperType) {
+    // This recursion is safe, because kV8MaxRttSubtypingDepth limits the
+    // number of recursive steps, so we won't overflow the stack.
+    CreateMapForType(isolate, module, supertype, instance, maps);
+    rtt_parent = handle(Map::cast(maps->get(supertype)), isolate);
+  }
+  Handle<Map> map;
+  switch (module->type_kinds[type_index]) {
+    case kWasmStructTypeCode:
+      map = CreateStructMap(isolate, module, type_index, rtt_parent, instance);
+      break;
+    case kWasmArrayTypeCode:
+      map = CreateArrayMap(isolate, module, type_index, rtt_parent, instance);
+      break;
+    case kWasmFunctionTypeCode:
+      // TODO(7748): Think about canonicalizing rtts to make them work for
+      // identical function types.
+      map = Map::Copy(isolate, isolate->wasm_exported_function_map(),
+                      "fresh function map for function type canonical rtt "
+                      "initialization");
+      break;
+  }
+  maps->set(type_index, *map);
 }
 
 namespace {
@@ -618,9 +655,12 @@ MaybeHandle<WasmInstanceObject> InstanceBuilder::Build() {
     Handle<FixedArray> tables = isolate_->factory()->NewFixedArray(table_count);
     for (int i = module_->num_imported_tables; i < table_count; i++) {
       const WasmTable& table = module_->tables[i];
+      // Initialize tables with null for now. We will initialize non-defaultable
+      // tables later, in {InitializeIndirectFunctionTables}.
       Handle<WasmTableObject> table_obj = WasmTableObject::New(
           isolate_, instance, table.type, table.initial_size,
-          table.has_maximum_size, table.maximum_size, nullptr);
+          table.has_maximum_size, table.maximum_size, nullptr,
+          isolate_->factory()->null_value());
       tables->set(i, *table_obj);
     }
     instance->set_tables(*tables);
@@ -628,11 +668,7 @@ MaybeHandle<WasmInstanceObject> InstanceBuilder::Build() {
 
   {
     Handle<FixedArray> tables = isolate_->factory()->NewFixedArray(table_count);
-    // Table 0 is handled specially. See {InitializeIndirectFunctionTable} for
-    // the initilization. All generated and runtime code will use this optimized
-    // shortcut in the instance. Hence it is safe to start with table 1 in the
-    // iteration below.
-    for (int i = 1; i < table_count; ++i) {
+    for (int i = 0; i < table_count; ++i) {
       const WasmTable& table = module_->tables[i];
       if (IsSubtypeOf(table.type, kWasmFuncRef, module_)) {
         Handle<WasmIndirectFunctionTable> table_obj =
@@ -642,6 +678,8 @@ MaybeHandle<WasmInstanceObject> InstanceBuilder::Build() {
     }
     instance->set_indirect_function_tables(*tables);
   }
+
+  instance->SetIndirectFunctionTableShortcuts(isolate_);
 
   //--------------------------------------------------------------------------
   // Process the imports for the module.
@@ -661,30 +699,32 @@ MaybeHandle<WasmInstanceObject> InstanceBuilder::Build() {
   if (enabled_.has_gc()) {
     Handle<FixedArray> maps = isolate_->factory()->NewFixedArray(
         static_cast<int>(module_->type_kinds.size()));
-    for (int map_index = 0;
-         map_index < static_cast<int>(module_->type_kinds.size());
-         map_index++) {
-      Handle<Map> map;
-      switch (module_->type_kinds[map_index]) {
-        case kWasmStructTypeCode:
-          map = CreateStructMap(isolate_, module_, map_index, Handle<Map>(),
-                                instance);
-          break;
-        case kWasmArrayTypeCode:
-          map = CreateArrayMap(isolate_, module_, map_index, Handle<Map>(),
-                               instance);
-          break;
-        case kWasmFunctionTypeCode:
-          // TODO(7748): Think about canonicalizing rtts to make them work for
-          // identical function types.
-          map = Map::Copy(isolate_, isolate_->wasm_exported_function_map(),
-                          "fresh function map for function type canonical rtt "
-                          "initialization");
-          break;
-      }
-      maps->set(map_index, *map);
+    for (uint32_t index = 0; index < module_->type_kinds.size(); index++) {
+      CreateMapForType(isolate_, module_, index, instance, maps);
     }
     instance->set_managed_object_maps(*maps);
+  }
+
+  //--------------------------------------------------------------------------
+  // Allocate type feedback vectors for functions.
+  //--------------------------------------------------------------------------
+  if (FLAG_wasm_speculative_inlining) {
+    int num_functions = static_cast<int>(module_->num_declared_functions);
+    Handle<FixedArray> vectors =
+        isolate_->factory()->NewFixedArray(num_functions, AllocationType::kOld);
+    instance->set_feedback_vectors(*vectors);
+    for (int i = 0; i < num_functions; i++) {
+      int func_index = module_->num_imported_functions + i;
+      int slots =
+          base::Relaxed_Load(&module_->functions[func_index].feedback_slots);
+      if (slots == 0) continue;
+      if (FLAG_trace_wasm_speculative_inlining) {
+        PrintF("[Function %d (declared %d): allocating %d feedback slots]\n",
+               func_index, i, slots);
+      }
+      Handle<FixedArray> feedback = isolate_->factory()->NewFixedArray(slots);
+      vectors->set(i, *feedback);
+    }
   }
 
   //--------------------------------------------------------------------------
@@ -830,6 +870,39 @@ MaybeHandle<Object> InstanceBuilder::LookupImport(uint32_t index,
   return result;
 }
 
+namespace {
+bool HasDefaultToNumberBehaviour(Isolate* isolate,
+                                 Handle<JSFunction> function) {
+  // Disallow providing a [Symbol.toPrimitive] member.
+  LookupIterator to_primitive_it{isolate, function,
+                                 isolate->factory()->to_primitive_symbol()};
+  if (to_primitive_it.state() != LookupIterator::NOT_FOUND) return false;
+
+  // The {valueOf} member must be the default "ObjectPrototypeValueOf".
+  LookupIterator value_of_it{isolate, function,
+                             isolate->factory()->valueOf_string()};
+  if (value_of_it.state() != LookupIterator::DATA) return false;
+  Handle<Object> value_of = value_of_it.GetDataValue();
+  if (!value_of->IsJSFunction()) return false;
+  Builtin value_of_builtin_id =
+      Handle<JSFunction>::cast(value_of)->code().builtin_id();
+  if (value_of_builtin_id != Builtin::kObjectPrototypeValueOf) return false;
+
+  // The {toString} member must be the default "FunctionPrototypeToString".
+  LookupIterator to_string_it{isolate, function,
+                              isolate->factory()->toString_string()};
+  if (to_string_it.state() != LookupIterator::DATA) return false;
+  Handle<Object> to_string = to_string_it.GetDataValue();
+  if (!to_string->IsJSFunction()) return false;
+  Builtin to_string_builtin_id =
+      Handle<JSFunction>::cast(to_string)->code().builtin_id();
+  if (to_string_builtin_id != Builtin::kFunctionPrototypeToString) return false;
+
+  // Just a default function, which will convert to "Nan". Accept this.
+  return true;
+}
+}  // namespace
+
 // Look up an import value in the {ffi_} object specifically for linking an
 // asm.js module. This only performs non-observable lookups, which allows
 // falling back to JavaScript proper (and hence re-executing all lookups) if
@@ -844,7 +917,6 @@ MaybeHandle<Object> InstanceBuilder::LookupImportAsm(
   // Perform lookup of the given {import_name} without causing any observable
   // side-effect. We only accept accesses that resolve to data properties,
   // which is indicated by the asm.js spec in section 7 ("Linking") as well.
-  Handle<Object> result;
   PropertyKey key(isolate_, Handle<Name>::cast(import_name));
   LookupIterator it(isolate_, ffi_.ToHandleChecked(), key);
   switch (it.state()) {
@@ -858,14 +930,23 @@ MaybeHandle<Object> InstanceBuilder::LookupImportAsm(
     case LookupIterator::NOT_FOUND:
       // Accepting missing properties as undefined does not cause any
       // observable difference from JavaScript semantics, we are lenient.
-      result = isolate_->factory()->undefined_value();
-      break;
-    case LookupIterator::DATA:
-      result = it.GetDataValue();
-      break;
+      return isolate_->factory()->undefined_value();
+    case LookupIterator::DATA: {
+      Handle<Object> value = it.GetDataValue();
+      // For legacy reasons, we accept functions for imported globals (see
+      // {ProcessImportedGlobal}), but only if we can easily determine that
+      // their Number-conversion is side effect free and returns NaN (which is
+      // the case as long as "valueOf" (or others) are not overwritten).
+      if (value->IsJSFunction() &&
+          module_->import_table[index].kind == kExternalGlobal &&
+          !HasDefaultToNumberBehaviour(isolate_,
+                                       Handle<JSFunction>::cast(value))) {
+        return ReportLinkError("function has special ToNumber behaviour", index,
+                               import_name);
+      }
+      return value;
+    }
   }
-
-  return result;
 }
 
 // Load data segments into the memory.
@@ -1104,9 +1185,10 @@ bool InstanceBuilder::InitializeImportedIndirectFunctionTable(
     // Look up the signature's canonical id. If there is no canonical
     // id, then the signature does not appear at all in this module,
     // so putting {-1} in the table will cause checks to always fail.
-    IndirectFunctionTableEntry(instance, table_index, i)
-        .Set(module_->signature_map.Find(*sig), target_instance,
-             function_index);
+    FunctionTargetAndRef entry(target_instance, function_index);
+    instance->GetIndirectFunctionTable(isolate_, table_index)
+        ->Set(i, module_->signature_map.Find(*sig), entry.call_target(),
+              *entry.ref());
   }
   return true;
 }
@@ -1341,9 +1423,9 @@ bool InstanceBuilder::ProcessImportedGlobal(Handle<WasmInstanceObject> instance,
     // Accepting {JSFunction} on top of just primitive values here is a
     // workaround to support legacy asm.js code with broken binding. Note
     // that using {NaN} (or Smi::zero()) here is what using the observable
-    // conversion via {ToPrimitive} would produce as well.
-    // TODO(wasm): Still observable if Function.prototype.valueOf or friends
-    // are patched, we might need to check for that as well.
+    // conversion via {ToPrimitive} would produce as well. {LookupImportAsm}
+    // checked via {HasDefaultToNumberBehaviour} that "valueOf" or friends have
+    // not been patched.
     if (value->IsJSFunction()) value = isolate_->factory()->nan_value();
     if (value->IsPrimitive()) {
       MaybeHandle<Object> converted = global.type == kWasmI32
@@ -1411,6 +1493,8 @@ bool InstanceBuilder::ProcessImportedGlobal(Handle<WasmInstanceObject> instance,
 void InstanceBuilder::CompileImportWrappers(
     Handle<WasmInstanceObject> instance) {
   int num_imports = static_cast<int>(module_->import_table.size());
+  TRACE_EVENT1("v8.wasm", "wasm.CompileImportWrappers", "num_imports",
+               num_imports);
   NativeModule* native_module = instance->module_object().native_module();
   WasmImportWrapperCache::ModificationScope cache_scope(
       native_module->import_wrapper_cache());
@@ -1786,7 +1870,8 @@ void SetNullTableEntry(Isolate* isolate, Handle<WasmInstanceObject> instance,
                        uint32_t table_index, uint32_t entry_index) {
   const WasmModule* module = instance->module();
   if (IsSubtypeOf(table_object->type(), kWasmFuncRef, module)) {
-    IndirectFunctionTableEntry(instance, table_index, entry_index).clear();
+    instance->GetIndirectFunctionTable(isolate, table_index)
+        ->Clear(entry_index);
   }
   WasmTableObject::Set(isolate, table_object, entry_index,
                        isolate->factory()->null_value());
@@ -1813,8 +1898,9 @@ void SetFunctionTableEntry(Isolate* isolate,
 
     // Update the local dispatch table first if necessary.
     uint32_t sig_id = module->canonicalized_type_ids[function->sig_index];
-    IndirectFunctionTableEntry(instance, table_index, entry_index)
-        .Set(sig_id, instance, func_index);
+    FunctionTargetAndRef entry(instance, func_index);
+    instance->GetIndirectFunctionTable(isolate, table_index)
+        ->Set(entry_index, sig_id, entry.call_target(), *entry.ref());
 
     // Update the table object's other dispatch tables.
     MaybeHandle<WasmExternalFunction> wasm_external_function =

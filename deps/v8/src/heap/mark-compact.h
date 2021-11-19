@@ -8,6 +8,7 @@
 #include <atomic>
 #include <vector>
 
+#include "include/v8-internal.h"
 #include "src/heap/concurrent-marking.h"
 #include "src/heap/marking-visitor.h"
 #include "src/heap/marking-worklist.h"
@@ -183,6 +184,7 @@ class LiveObjectVisitor : AllStatic {
   static void RecomputeLiveBytes(MemoryChunk* chunk, MarkingState* state);
 };
 
+enum class AlwaysPromoteYoung { kYes, kNo };
 enum PageEvacuationMode { NEW_TO_NEW, NEW_TO_OLD };
 enum MarkingTreatmentMode { KEEP, CLEAR };
 enum class RememberedSetUpdatingMode { ALL, OLD_TO_NEW_ONLY };
@@ -214,22 +216,20 @@ class MarkCompactCollectorBase {
   virtual void Evacuate() = 0;
   virtual void EvacuatePagesInParallel() = 0;
   virtual void UpdatePointersAfterEvacuation() = 0;
-  virtual std::unique_ptr<UpdatingItem> CreateToSpaceUpdatingItem(
-      MemoryChunk* chunk, Address start, Address end) = 0;
   virtual std::unique_ptr<UpdatingItem> CreateRememberedSetUpdatingItem(
       MemoryChunk* chunk, RememberedSetUpdatingMode updating_mode) = 0;
 
+  // Returns the number of wanted compaction tasks.
   template <class Evacuator, class Collector>
-  void CreateAndExecuteEvacuationTasks(
+  size_t CreateAndExecuteEvacuationTasks(
       Collector* collector,
       std::vector<std::pair<ParallelWorkItem, MemoryChunk*>> evacuation_items,
-      MigrationObserver* migration_observer, const intptr_t live_bytes);
+      MigrationObserver* migration_observer);
 
   // Returns whether this page should be moved according to heuristics.
-  bool ShouldMovePage(Page* p, intptr_t live_bytes, bool promote_young);
+  bool ShouldMovePage(Page* p, intptr_t live_bytes,
+                      AlwaysPromoteYoung promote_young);
 
-  int CollectToSpaceUpdatingItems(
-      std::vector<std::unique_ptr<UpdatingItem>>* items);
   template <typename IterateableSpace>
   int CollectRememberedSetUpdatingItems(
       std::vector<std::unique_ptr<UpdatingItem>>* items,
@@ -377,11 +377,12 @@ class MainMarkingVisitor final
                      WeakObjects* weak_objects, Heap* heap,
                      unsigned mark_compact_epoch,
                      base::EnumSet<CodeFlushMode> code_flush_mode,
-                     bool embedder_tracing_enabled, bool is_forced_gc)
+                     bool embedder_tracing_enabled,
+                     bool should_keep_ages_unchanged)
       : MarkingVisitorBase<MainMarkingVisitor<MarkingState>, MarkingState>(
             kMainThreadTask, local_marking_worklists, weak_objects, heap,
             mark_compact_epoch, code_flush_mode, embedder_tracing_enabled,
-            is_forced_gc),
+            should_keep_ages_unchanged),
         marking_state_(marking_state),
         revisiting_object_(false) {}
 
@@ -390,9 +391,6 @@ class MainMarkingVisitor final
     return marking_state_->GreyToBlack(object) ||
            V8_UNLIKELY(revisiting_object_);
   }
-
-  void MarkDescriptorArrayFromWriteBarrier(DescriptorArray descriptors,
-                                           int number_of_own_descriptors);
 
  private:
   // Functions required by MarkingVisitorBase.
@@ -453,6 +451,11 @@ class MarkCompactCollector final : public MarkCompactCollectorBase {
     kTrackNewlyDiscoveredObjects
   };
 
+  enum class StartCompactionMode {
+    kIncremental,
+    kAtomic,
+  };
+
   MarkingState* marking_state() { return &marking_state_; }
 
   NonAtomicMarkingState* non_atomic_marking_state() {
@@ -476,7 +479,8 @@ class MarkCompactCollector final : public MarkCompactCollectorBase {
   // it to complete as requested by |stop_request|).
   void FinishConcurrentMarking();
 
-  bool StartCompaction();
+  // Returns whether compaction is running.
+  bool StartCompaction(StartCompactionMode mode);
 
   void AbortCompaction();
 
@@ -582,10 +586,6 @@ class MarkCompactCollector final : public MarkCompactCollectorBase {
   void VisitObject(HeapObject obj);
   // Used by incremental marking for black-allocated objects.
   void RevisitObject(HeapObject obj);
-  // Ensures that all descriptors int range [0, number_of_own_descripts)
-  // are visited.
-  void MarkDescriptorArrayFromWriteBarrier(DescriptorArray array,
-                                           int number_of_own_descriptors);
 
   // Drains the main thread marking worklist until the specified number of
   // bytes are processed. If the number of bytes is zero, then the worklist
@@ -716,16 +716,16 @@ class MarkCompactCollector final : public MarkCompactCollectorBase {
   void EvacuatePagesInParallel() override;
   void UpdatePointersAfterEvacuation() override;
 
-  std::unique_ptr<UpdatingItem> CreateToSpaceUpdatingItem(MemoryChunk* chunk,
-                                                          Address start,
-                                                          Address end) override;
   std::unique_ptr<UpdatingItem> CreateRememberedSetUpdatingItem(
       MemoryChunk* chunk, RememberedSetUpdatingMode updating_mode) override;
 
   void ReleaseEvacuationCandidates();
-  void PostProcessEvacuationCandidates();
-  void ReportAbortedEvacuationCandidate(HeapObject failed_object,
-                                        MemoryChunk* chunk);
+  // Returns number of aborted pages.
+  size_t PostProcessEvacuationCandidates();
+  void ReportAbortedEvacuationCandidateDueToOOM(Address failed_start,
+                                                Page* page);
+  void ReportAbortedEvacuationCandidateDueToFlags(Address failed_start,
+                                                  Page* page);
 
   static const int kEphemeronChunkSize = 8 * KB;
 
@@ -734,7 +734,7 @@ class MarkCompactCollector final : public MarkCompactCollectorBase {
   void RightTrimDescriptorArray(DescriptorArray array, int descriptors_to_trim);
 
   base::Mutex mutex_;
-  base::Semaphore page_parallel_job_semaphore_;
+  base::Semaphore page_parallel_job_semaphore_{0};
 
 #ifdef DEBUG
   enum CollectorState{IDLE,
@@ -751,17 +751,13 @@ class MarkCompactCollector final : public MarkCompactCollectorBase {
 
   const bool is_shared_heap_;
 
-  bool was_marked_incrementally_;
-
-  bool evacuation_;
-
+  bool was_marked_incrementally_ = false;
+  bool evacuation_ = false;
   // True if we are collecting slots to perform evacuation from evacuation
   // candidates.
-  bool compacting_;
-
-  bool black_allocation_;
-
-  bool have_code_to_deoptimize_;
+  bool compacting_ = false;
+  bool black_allocation_ = false;
+  bool have_code_to_deoptimize_ = false;
 
   MarkingWorklists marking_worklists_;
 
@@ -778,7 +774,10 @@ class MarkCompactCollector final : public MarkCompactCollectorBase {
   // Pages that are actually processed during evacuation.
   std::vector<Page*> old_space_evacuation_pages_;
   std::vector<Page*> new_space_evacuation_pages_;
-  std::vector<std::pair<HeapObject, Page*>> aborted_evacuation_candidates_;
+  std::vector<std::pair<Address, Page*>>
+      aborted_evacuation_candidates_due_to_oom_;
+  std::vector<std::pair<Address, Page*>>
+      aborted_evacuation_candidates_due_to_flags_;
 
   Sweeper* sweeper_;
 
@@ -868,9 +867,12 @@ class MinorMarkCompactCollector final : public MarkCompactCollectorBase {
 
   std::unique_ptr<UpdatingItem> CreateToSpaceUpdatingItem(MemoryChunk* chunk,
                                                           Address start,
-                                                          Address end) override;
+                                                          Address end);
   std::unique_ptr<UpdatingItem> CreateRememberedSetUpdatingItem(
       MemoryChunk* chunk, RememberedSetUpdatingMode updating_mode) override;
+
+  int CollectToSpaceUpdatingItems(
+      std::vector<std::unique_ptr<UpdatingItem>>* items);
 
   void SweepArrayBufferExtensions();
 

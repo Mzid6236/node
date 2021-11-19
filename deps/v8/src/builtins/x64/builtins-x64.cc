@@ -78,7 +78,7 @@ static void GenerateTailCallToReturnedCode(
     __ Pop(kJavaScriptCallTargetRegister);
   }
   static_assert(kJavaScriptCallCodeStartRegister == rcx, "ABI mismatch");
-  __ JumpCodeObject(rcx, jump_mode);
+  __ JumpCodeTObject(rcx, jump_mode);
 }
 
 namespace {
@@ -212,8 +212,10 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
       rbx, FieldOperand(rdi, JSFunction::kSharedFunctionInfoOffset));
   __ movl(rbx, FieldOperand(rbx, SharedFunctionInfo::kFlagsOffset));
   __ DecodeField<SharedFunctionInfo::FunctionKindBits>(rbx);
-  __ JumpIfIsInRange(rbx, kDefaultDerivedConstructor, kDerivedConstructor,
-                     &not_create_implicit_receiver, Label::kNear);
+  __ JumpIfIsInRange(
+      rbx, static_cast<uint32_t>(FunctionKind::kDefaultDerivedConstructor),
+      static_cast<uint32_t>(FunctionKind::kDerivedConstructor),
+      &not_create_implicit_receiver, Label::kNear);
 
   // If not derived class constructor: Allocate the new receiver object.
   __ IncrementCounter(masm->isolate()->counters()->constructed_objects(), 1);
@@ -948,7 +950,7 @@ static void TailCallRuntimeIfMarkerEquals(MacroAssembler* masm,
                                           Runtime::FunctionId function_id) {
   ASM_CODE_COMMENT(masm);
   Label no_match;
-  __ Cmp(actual_marker, expected_marker);
+  __ Cmp(actual_marker, static_cast<int>(expected_marker));
   __ j(not_equal, &no_match);
   GenerateTailCallToReturnedCode(masm, function_id);
   __ bind(&no_match);
@@ -1828,7 +1830,7 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
       // Push the baseline code return address now, as if it had been pushed by
       // the call to this builtin.
       __ PushReturnAddressFrom(return_address);
-      FrameScope frame_scope(masm, StackFrame::INTERNAL);
+      FrameScope inner_frame_scope(masm, StackFrame::INTERNAL);
       // Save incoming new target or generator
       __ Push(new_target);
       __ SmiTag(frame_size);
@@ -2375,17 +2377,10 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
   // -----------------------------------
 
   StackArgumentsAccessor args(rax);
-  __ AssertFunction(rdi);
+  __ AssertCallableFunction(rdi);
 
-  // ES6 section 9.2.1 [[Call]] ( thisArgument, argumentsList)
-  // Check that the function is not a "classConstructor".
-  Label class_constructor;
   __ LoadTaggedPointerField(
       rdx, FieldOperand(rdi, JSFunction::kSharedFunctionInfoOffset));
-  __ testl(FieldOperand(rdx, SharedFunctionInfo::kFlagsOffset),
-           Immediate(SharedFunctionInfo::IsClassConstructorBit::kMask));
-  __ j(not_zero, &class_constructor);
-
   // ----------- S t a t e -------------
   //  -- rax : the number of arguments
   //  -- rdx : the shared function info.
@@ -2470,14 +2465,6 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
   __ movzxwq(
       rbx, FieldOperand(rdx, SharedFunctionInfo::kFormalParameterCountOffset));
   __ InvokeFunctionCode(rdi, no_reg, rbx, rax, InvokeType::kJump);
-
-  // The function is a "classConstructor", need to raise an exception.
-  __ bind(&class_constructor);
-  {
-    FrameScope frame(masm, StackFrame::INTERNAL);
-    __ Push(rdi);
-    __ CallRuntime(Runtime::kThrowConstructorNonCallableError);
-  }
 }
 
 namespace {
@@ -2589,36 +2576,48 @@ void Builtins::Generate_Call(MacroAssembler* masm, ConvertReceiverMode mode) {
   //  -- rax : the number of arguments
   //  -- rdi : the target to call (can be any Object)
   // -----------------------------------
-  StackArgumentsAccessor args(rax);
+  Register argc = rax;
+  Register target = rdi;
+  Register map = rcx;
+  Register instance_type = rdx;
+  DCHECK(!AreAliased(argc, target, map, instance_type));
 
-  Label non_callable;
-  __ JumpIfSmi(rdi, &non_callable);
-  __ LoadMap(rcx, rdi);
-  __ CmpInstanceTypeRange(rcx, FIRST_JS_FUNCTION_TYPE, LAST_JS_FUNCTION_TYPE);
+  StackArgumentsAccessor args(argc);
+
+  Label non_callable, class_constructor;
+  __ JumpIfSmi(target, &non_callable);
+  __ LoadMap(map, target);
+  __ CmpInstanceTypeRange(map, instance_type, FIRST_CALLABLE_JS_FUNCTION_TYPE,
+                          LAST_CALLABLE_JS_FUNCTION_TYPE);
   __ Jump(masm->isolate()->builtins()->CallFunction(mode),
           RelocInfo::CODE_TARGET, below_equal);
 
-  __ CmpInstanceType(rcx, JS_BOUND_FUNCTION_TYPE);
+  __ cmpw(instance_type, Immediate(JS_BOUND_FUNCTION_TYPE));
   __ Jump(BUILTIN_CODE(masm->isolate(), CallBoundFunction),
           RelocInfo::CODE_TARGET, equal);
 
   // Check if target has a [[Call]] internal method.
-  __ testb(FieldOperand(rcx, Map::kBitFieldOffset),
+  __ testb(FieldOperand(map, Map::kBitFieldOffset),
            Immediate(Map::Bits1::IsCallableBit::kMask));
   __ j(zero, &non_callable, Label::kNear);
 
   // Check if target is a proxy and call CallProxy external builtin
-  __ CmpInstanceType(rcx, JS_PROXY_TYPE);
+  __ cmpw(instance_type, Immediate(JS_PROXY_TYPE));
   __ Jump(BUILTIN_CODE(masm->isolate(), CallProxy), RelocInfo::CODE_TARGET,
           equal);
+
+  // ES6 section 9.2.1 [[Call]] ( thisArgument, argumentsList)
+  // Check that the function is not a "classConstructor".
+  __ cmpw(instance_type, Immediate(JS_CLASS_CONSTRUCTOR_TYPE));
+  __ j(equal, &class_constructor);
 
   // 2. Call to something else, which might have a [[Call]] internal method (if
   // not we raise an exception).
 
   // Overwrite the original receiver with the (original) target.
-  __ movq(args.GetReceiverOperand(), rdi);
+  __ movq(args.GetReceiverOperand(), target);
   // Let the "call_as_function_delegate" take care of the rest.
-  __ LoadNativeContextSlot(rdi, Context::CALL_AS_FUNCTION_DELEGATE_INDEX);
+  __ LoadNativeContextSlot(target, Context::CALL_AS_FUNCTION_DELEGATE_INDEX);
   __ Jump(masm->isolate()->builtins()->CallFunction(
               ConvertReceiverMode::kNotNullOrUndefined),
           RelocInfo::CODE_TARGET);
@@ -2627,8 +2626,18 @@ void Builtins::Generate_Call(MacroAssembler* masm, ConvertReceiverMode mode) {
   __ bind(&non_callable);
   {
     FrameScope scope(masm, StackFrame::INTERNAL);
-    __ Push(rdi);
+    __ Push(target);
     __ CallRuntime(Runtime::kThrowCalledNonCallable);
+    __ Trap();  // Unreachable.
+  }
+
+  // 4. The function is a "classConstructor", need to raise an exception.
+  __ bind(&class_constructor);
+  {
+    FrameScope frame(masm, StackFrame::INTERNAL);
+    __ Push(target);
+    __ CallRuntime(Runtime::kThrowConstructorNonCallableError);
+    __ Trap();  // Unreachable.
   }
 }
 
@@ -2695,40 +2704,48 @@ void Builtins::Generate_Construct(MacroAssembler* masm) {
   //           the JSFunction on which new was invoked initially)
   //  -- rdi : the constructor to call (can be any Object)
   // -----------------------------------
-  StackArgumentsAccessor args(rax);
+  Register argc = rax;
+  Register target = rdi;
+  Register map = rcx;
+  Register instance_type = r8;
+  DCHECK(!AreAliased(argc, target, map, instance_type));
+
+  StackArgumentsAccessor args(argc);
 
   // Check if target is a Smi.
   Label non_constructor;
-  __ JumpIfSmi(rdi, &non_constructor);
+  __ JumpIfSmi(target, &non_constructor);
 
   // Check if target has a [[Construct]] internal method.
-  __ LoadMap(rcx, rdi);
-  __ testb(FieldOperand(rcx, Map::kBitFieldOffset),
+  __ LoadMap(map, target);
+  __ testb(FieldOperand(map, Map::kBitFieldOffset),
            Immediate(Map::Bits1::IsConstructorBit::kMask));
   __ j(zero, &non_constructor);
 
   // Dispatch based on instance type.
-  __ CmpInstanceTypeRange(rcx, FIRST_JS_FUNCTION_TYPE, LAST_JS_FUNCTION_TYPE);
+  __ CmpInstanceTypeRange(map, instance_type, FIRST_JS_FUNCTION_TYPE,
+                          LAST_JS_FUNCTION_TYPE);
   __ Jump(BUILTIN_CODE(masm->isolate(), ConstructFunction),
           RelocInfo::CODE_TARGET, below_equal);
 
   // Only dispatch to bound functions after checking whether they are
   // constructors.
-  __ CmpInstanceType(rcx, JS_BOUND_FUNCTION_TYPE);
+  __ cmpw(instance_type, Immediate(JS_BOUND_FUNCTION_TYPE));
   __ Jump(BUILTIN_CODE(masm->isolate(), ConstructBoundFunction),
           RelocInfo::CODE_TARGET, equal);
 
   // Only dispatch to proxies after checking whether they are constructors.
-  __ CmpInstanceType(rcx, JS_PROXY_TYPE);
+  __ cmpw(instance_type, Immediate(JS_PROXY_TYPE));
   __ Jump(BUILTIN_CODE(masm->isolate(), ConstructProxy), RelocInfo::CODE_TARGET,
           equal);
 
   // Called Construct on an exotic Object with a [[Construct]] internal method.
   {
     // Overwrite the original receiver with the (original) target.
-    __ movq(args.GetReceiverOperand(), rdi);
+    __ movq(args.GetReceiverOperand(), target);
     // Let the "call_as_constructor_delegate" take care of the rest.
-    __ LoadNativeContextSlot(rdi, Context::CALL_AS_CONSTRUCTOR_DELEGATE_INDEX);
+    __ LoadNativeContextSlot(target,
+                             Context::CALL_AS_CONSTRUCTOR_DELEGATE_INDEX);
     __ Jump(masm->isolate()->builtins()->CallFunction(),
             RelocInfo::CODE_TARGET);
   }
@@ -2947,15 +2964,9 @@ void Builtins::Generate_GenericJSToWasmWrapper(MacroAssembler* masm) {
   // -------------------------------------------
   // Compute offsets and prepare for GC.
   // -------------------------------------------
-  // We will have to save a value indicating the GC the number
-  // of values on the top of the stack that have to be scanned before calling
-  // the Wasm function.
-  constexpr int kFrameMarkerOffset = -kSystemPointerSize;
-  constexpr int kGCScanSlotCountOffset =
-      kFrameMarkerOffset - kSystemPointerSize;
   // The number of parameters passed to this function.
   constexpr int kInParamCountOffset =
-      kGCScanSlotCountOffset - kSystemPointerSize;
+      BuiltinWasmWrapperConstants::kGCScanSlotCountOffset - kSystemPointerSize;
   // The number of parameters according to the signature.
   constexpr int kParamCountOffset = kInParamCountOffset - kSystemPointerSize;
   constexpr int kReturnCountOffset = kParamCountOffset - kSystemPointerSize;
@@ -3372,7 +3383,8 @@ void Builtins::Generate_GenericJSToWasmWrapper(MacroAssembler* masm) {
 
   // We set the indicating value for the GC to the proper one for Wasm call.
   constexpr int kWasmCallGCScanSlotCount = 0;
-  __ Move(MemOperand(rbp, kGCScanSlotCountOffset), kWasmCallGCScanSlotCount);
+  __ Move(MemOperand(rbp, BuiltinWasmWrapperConstants::kGCScanSlotCountOffset),
+          kWasmCallGCScanSlotCount);
 
   // -------------------------------------------
   // Call the Wasm function.
@@ -3455,10 +3467,12 @@ void Builtins::Generate_GenericJSToWasmWrapper(MacroAssembler* masm) {
   // The builtin expects the parameter to be in register param = rax.
 
   constexpr int kBuiltinCallGCScanSlotCount = 2;
-  PrepareForBuiltinCall(masm, MemOperand(rbp, kGCScanSlotCountOffset),
-                        kBuiltinCallGCScanSlotCount, current_param, param_limit,
-                        current_int_param_slot, current_float_param_slot,
-                        valuetypes_array_ptr, wasm_instance, function_data);
+  PrepareForBuiltinCall(
+      masm,
+      MemOperand(rbp, BuiltinWasmWrapperConstants::kGCScanSlotCountOffset),
+      kBuiltinCallGCScanSlotCount, current_param, param_limit,
+      current_int_param_slot, current_float_param_slot, valuetypes_array_ptr,
+      wasm_instance, function_data);
 
   Label param_kWasmI32_not_smi;
   Label param_kWasmI64;
@@ -3605,7 +3619,8 @@ void Builtins::Generate_GenericJSToWasmWrapper(MacroAssembler* masm) {
   // -------------------------------------------
   __ bind(&compile_wrapper);
   // Enable GC.
-  MemOperand GCScanSlotPlace = MemOperand(rbp, kGCScanSlotCountOffset);
+  MemOperand GCScanSlotPlace =
+      MemOperand(rbp, BuiltinWasmWrapperConstants::kGCScanSlotCountOffset);
   __ Move(GCScanSlotPlace, 4);
   // Save registers to the stack.
   __ pushq(wasm_instance);
@@ -3623,6 +3638,205 @@ void Builtins::Generate_GenericJSToWasmWrapper(MacroAssembler* masm) {
   __ popq(function_data);
   __ popq(wasm_instance);
   __ jmp(&compile_wrapper_done);
+}
+
+namespace {
+// Helper function for WasmReturnPromiseOnSuspend.
+void LoadJumpBuffer(MacroAssembler* masm, Register jmpbuf) {
+  __ movq(rsp, MemOperand(jmpbuf, wasm::kJmpBufSpOffset));
+  // The stack limit is set separately under the ExecutionAccess lock.
+  // TODO(thibaudm): Reload live registers.
+}
+}  // namespace
+
+void Builtins::Generate_WasmReturnPromiseOnSuspend(MacroAssembler* masm) {
+  // Set up the stackframe.
+  __ EnterFrame(StackFrame::RETURN_PROMISE_ON_SUSPEND);
+
+  // Parameters.
+  Register closure = kJSFunctionRegister;                  // rdi
+  Register param_count = kJavaScriptCallArgCountRegister;  // rax
+  if (kJSArgcIncludesReceiver) {
+    __ decq(param_count);
+  }
+
+  constexpr int kFrameMarkerOffset = -kSystemPointerSize;
+  // This slot contains the number of slots at the top of the frame that need to
+  // be scanned by the GC.
+  constexpr int kParamCountOffset =
+      BuiltinWasmWrapperConstants::kGCScanSlotCountOffset - kSystemPointerSize;
+  // The frame marker is not included in the slot count.
+  constexpr int kNumSpillSlots =
+      -(kParamCountOffset - kFrameMarkerOffset) / kSystemPointerSize;
+  __ subq(rsp, Immediate(kNumSpillSlots * kSystemPointerSize));
+
+  __ movq(MemOperand(rbp, kParamCountOffset), param_count);
+
+  // -------------------------------------------
+  // Get the instance and wasm call target.
+  // -------------------------------------------
+  Register sfi = closure;
+  __ LoadAnyTaggedField(
+      sfi,
+      MemOperand(
+          closure,
+          wasm::ObjectAccess::SharedFunctionInfoOffsetInTaggedJSFunction()));
+  Register function_data = sfi;
+  __ LoadAnyTaggedField(
+      function_data,
+      FieldOperand(sfi, SharedFunctionInfo::kFunctionDataOffset));
+  Register wasm_instance = kWasmInstanceRegister;  // rsi
+  __ LoadAnyTaggedField(
+      wasm_instance,
+      FieldOperand(function_data, WasmExportedFunctionData::kInstanceOffset));
+  sfi = no_reg;
+  closure = no_reg;
+  // live: [rsi, rdi]
+
+  // -------------------------------------------
+  // Save current state in active jmpbuf.
+  // -------------------------------------------
+  Register active_continuation = rax;
+  Register foreign_jmpbuf = rbx;
+  __ LoadRoot(active_continuation, RootIndex::kActiveContinuation);
+  __ LoadAnyTaggedField(
+      foreign_jmpbuf,
+      FieldOperand(active_continuation, WasmContinuationObject::kJmpbufOffset));
+  Register jmpbuf = rbx;
+  __ LoadExternalPointerField(
+      jmpbuf, FieldOperand(foreign_jmpbuf, Foreign::kForeignAddressOffset),
+      kForeignForeignAddressTag, r8);
+  __ movq(MemOperand(jmpbuf, wasm::kJmpBufSpOffset), rsp);
+  Register stack_limit_address = rcx;
+  __ movq(stack_limit_address,
+          FieldOperand(wasm_instance,
+                       WasmInstanceObject::kRealStackLimitAddressOffset));
+  Register stack_limit = rdx;
+  __ movq(stack_limit, MemOperand(stack_limit_address, 0));
+  __ movq(MemOperand(jmpbuf, wasm::kJmpBufStackLimitOffset), stack_limit);
+  // TODO(thibaudm): Save live registers.
+  foreign_jmpbuf = no_reg;
+  stack_limit = no_reg;
+  stack_limit_address = no_reg;
+  // live: [rsi, rdi, rax]
+
+  // -------------------------------------------
+  // Allocate a new continuation.
+  // -------------------------------------------
+  MemOperand GCScanSlotPlace =
+      MemOperand(rbp, BuiltinWasmWrapperConstants::kGCScanSlotCountOffset);
+  __ Move(GCScanSlotPlace, 2);
+  __ Push(wasm_instance);
+  __ Push(function_data);
+  __ Move(kContextRegister, Smi::zero());
+  __ CallRuntime(Runtime::kWasmAllocateContinuation);
+  __ Pop(function_data);
+  __ Pop(wasm_instance);
+  STATIC_ASSERT(kReturnRegister0 == rax);
+  Register target_continuation = rax;
+  // live: [rsi, rdi, rax]
+
+  // -------------------------------------------
+  // Load target continuation jmpbuf.
+  // -------------------------------------------
+  foreign_jmpbuf = rbx;
+  __ LoadAnyTaggedField(
+      foreign_jmpbuf,
+      FieldOperand(target_continuation, WasmContinuationObject::kJmpbufOffset));
+  Register target_jmpbuf = rbx;
+  __ LoadExternalPointerField(
+      target_jmpbuf,
+      FieldOperand(foreign_jmpbuf, Foreign::kForeignAddressOffset),
+      kForeignForeignAddressTag, r8);
+  // Switch stack!
+  LoadJumpBuffer(masm, target_jmpbuf);
+  __ movq(rbp, rsp);  // New stack, there is no frame yet.
+  __ Move(GCScanSlotPlace, 2);
+  __ Push(wasm_instance);
+  __ Push(function_data);
+  __ Move(kContextRegister, Smi::zero());
+  __ CallRuntime(Runtime::kWasmSyncStackLimit);
+  __ Pop(function_data);
+  __ Pop(wasm_instance);
+  foreign_jmpbuf = no_reg;
+  target_jmpbuf = no_reg;
+  // live: [rsi, rdi]
+
+  // -------------------------------------------
+  // Load and call target wasm function.
+  // -------------------------------------------
+  // TODO(thibaudm): Handle arguments.
+  // TODO(thibaudm): Handle GC.
+  // Set thread_in_wasm_flag.
+  Register thread_in_wasm_flag_addr = rax;
+  __ movq(
+      thread_in_wasm_flag_addr,
+      MemOperand(kRootRegister, Isolate::thread_in_wasm_flag_address_offset()));
+  __ movl(MemOperand(thread_in_wasm_flag_addr, 0), Immediate(1));
+  Register function_entry = function_data;
+  __ LoadExternalPointerField(
+      function_entry,
+      FieldOperand(function_data,
+                   WasmExportedFunctionData::kForeignAddressOffset),
+      kForeignForeignAddressTag, r8);
+  __ Push(wasm_instance);
+  __ call(function_entry);
+  __ Pop(wasm_instance);
+  // Unset thread_in_wasm_flag.
+  __ movq(
+      thread_in_wasm_flag_addr,
+      MemOperand(kRootRegister, Isolate::thread_in_wasm_flag_address_offset()));
+  __ movl(MemOperand(thread_in_wasm_flag_addr, 0), Immediate(0));
+  thread_in_wasm_flag_addr = no_reg;
+  function_entry = no_reg;
+  function_data = no_reg;
+  // live: [rsi]
+
+  // -------------------------------------------
+  // Reload parent continuation.
+  // -------------------------------------------
+  active_continuation = rbx;
+  __ LoadRoot(active_continuation, RootIndex::kActiveContinuation);
+  Register parent = rdx;
+  __ LoadAnyTaggedField(
+      parent,
+      FieldOperand(active_continuation, WasmContinuationObject::kParentOffset));
+  active_continuation = no_reg;
+  // live: [rsi]
+
+  // -------------------------------------------
+  // Update instance active continuation.
+  // -------------------------------------------
+  __ movq(masm->RootAsOperand(RootIndex::kActiveContinuation), parent);
+  foreign_jmpbuf = rax;
+  __ LoadAnyTaggedField(
+      foreign_jmpbuf,
+      FieldOperand(parent, WasmContinuationObject::kJmpbufOffset));
+  jmpbuf = foreign_jmpbuf;
+  __ LoadExternalPointerField(
+      jmpbuf, FieldOperand(foreign_jmpbuf, Foreign::kForeignAddressOffset),
+      kForeignForeignAddressTag, r8);
+  // Switch stack!
+  LoadJumpBuffer(masm, jmpbuf);
+  __ leaq(rbp, Operand(rsp, (kNumSpillSlots + 1) * kSystemPointerSize));
+  __ Move(GCScanSlotPlace, 1);
+  __ Push(wasm_instance);  // Spill.
+  __ Move(kContextRegister, Smi::zero());
+  __ CallRuntime(Runtime::kWasmSyncStackLimit);
+  __ Pop(wasm_instance);
+  parent = no_reg;
+  active_continuation = no_reg;
+  foreign_jmpbuf = no_reg;
+  wasm_instance = no_reg;
+
+  // -------------------------------------------
+  // Epilogue.
+  // -------------------------------------------
+  __ movq(param_count, MemOperand(rbp, kParamCountOffset));
+  __ LeaveFrame(StackFrame::RETURN_PROMISE_ON_SUSPEND);
+  __ DropArguments(param_count, r8, TurboAssembler::kCountIsInteger,
+                   TurboAssembler::kCountExcludesReceiver);
+  __ ret(0);
 }
 
 void Builtins::Generate_WasmOnStackReplace(MacroAssembler* masm) {

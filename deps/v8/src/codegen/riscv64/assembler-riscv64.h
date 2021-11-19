@@ -354,15 +354,6 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // ---------------------------------------------------------------------------
   // Code generation.
 
-  // This function is called when on-heap-compilation invariants are
-  // invalidated. For instance, when the assembler buffer grows or a GC happens
-  // between Code object allocation and Code object finalization.
-  void FixOnHeapReferences(bool update_embedded_objects = true);
-
-  // This function is called when we fallback from on-heap to off-heap
-  // compilation and patch on-heap references to handles.
-  void FixOnHeapReferencesToHandles();
-
   // Insert the smallest number of nop instructions
   // possible to align the pc offset to a multiple
   // of m. m must be a power of 2 (>= 4).
@@ -755,6 +746,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   void vmadc_vx(VRegister vd, Register rs1, VRegister vs2);
   void vmadc_vi(VRegister vd, uint8_t imm5, VRegister vs2);
 
+  void vfmv_vf(VRegister vd, FPURegister fs1, MaskType mask = NoMask);
+  void vfmv_fs(FPURegister fd, VRegister vs2, MaskType mask = NoMask);
+
 #define DEFINE_OPIVV(name, funct6)                           \
   void name##_vv(VRegister vd, VRegister vs2, VRegister vs1, \
                  MaskType mask = NoMask);
@@ -775,6 +769,25 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   void name##_vx(VRegister vd, VRegister vs2, Register rs1, \
                  MaskType mask = NoMask);
 
+#define DEFINE_OPFVV(name, funct6)                           \
+  void name##_vv(VRegister vd, VRegister vs2, VRegister vs1, \
+                 MaskType mask = NoMask);
+
+#define DEFINE_OPFVF(name, funct6)                             \
+  void name##_vf(VRegister vd, VRegister vs2, FPURegister fs1, \
+                 MaskType mask = NoMask);
+
+#define DEFINE_OPFVV_FMA(name, funct6)                       \
+  void name##_vv(VRegister vd, VRegister vs1, VRegister vs2, \
+                 MaskType mask = NoMask);
+
+#define DEFINE_OPFVF_FMA(name, funct6)                         \
+  void name##_vf(VRegister vd, FPURegister fs1, VRegister vs2, \
+                 MaskType mask = NoMask);
+
+#define DEFINE_OPMVV_VIE(name) \
+  void name(VRegister vd, VRegister vs2, MaskType mask = NoMask);
+
   DEFINE_OPIVV(vadd, VADD_FUNCT6)
   DEFINE_OPIVX(vadd, VADD_FUNCT6)
   DEFINE_OPIVI(vadd, VADD_FUNCT6)
@@ -784,8 +797,8 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   DEFINE_OPIVV(vsadd, VSADD_FUNCT6)
   DEFINE_OPIVI(vsadd, VSADD_FUNCT6)
   DEFINE_OPIVX(vsaddu, VSADD_FUNCT6)
-  DEFINE_OPIVV(vsaddu, VSADD_FUNCT6)
-  DEFINE_OPIVI(vsaddu, VSADD_FUNCT6)
+  DEFINE_OPIVV(vsaddu, VSADDU_FUNCT6)
+  DEFINE_OPIVI(vsaddu, VSADDU_FUNCT6)
   DEFINE_OPIVX(vssub, VSSUB_FUNCT6)
   DEFINE_OPIVV(vssub, VSSUB_FUNCT6)
   DEFINE_OPIVX(vssubu, VSSUBU_FUNCT6)
@@ -858,15 +871,95 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   DEFINE_OPMVV(vredmax, VREDMAX_FUNCT6)
   DEFINE_OPMVV(vredmin, VREDMIN_FUNCT6)
   DEFINE_OPMVV(vredminu, VREDMINU_FUNCT6)
+
+  DEFINE_OPFVV(vfadd, VFADD_FUNCT6)
+  DEFINE_OPFVF(vfadd, VFADD_FUNCT6)
+  DEFINE_OPFVV(vfsub, VFSUB_FUNCT6)
+  DEFINE_OPFVF(vfsub, VFSUB_FUNCT6)
+  DEFINE_OPFVV(vfdiv, VFDIV_FUNCT6)
+  DEFINE_OPFVF(vfdiv, VFDIV_FUNCT6)
+  DEFINE_OPFVV(vfmul, VFMUL_FUNCT6)
+  DEFINE_OPFVF(vfmul, VFMUL_FUNCT6)
+
+  DEFINE_OPFVV(vmfeq, VMFEQ_FUNCT6)
+  DEFINE_OPFVV(vmfne, VMFNE_FUNCT6)
+  DEFINE_OPFVV(vmflt, VMFLT_FUNCT6)
+  DEFINE_OPFVV(vmfle, VMFLE_FUNCT6)
+  DEFINE_OPFVV(vfmax, VMFMAX_FUNCT6)
+  DEFINE_OPFVV(vfmin, VMFMIN_FUNCT6)
+
+  DEFINE_OPFVV(vfsngj, VFSGNJ_FUNCT6)
+  DEFINE_OPFVF(vfsngj, VFSGNJ_FUNCT6)
+  DEFINE_OPFVV(vfsngjn, VFSGNJN_FUNCT6)
+  DEFINE_OPFVF(vfsngjn, VFSGNJN_FUNCT6)
+  DEFINE_OPFVV(vfsngjx, VFSGNJX_FUNCT6)
+  DEFINE_OPFVF(vfsngjx, VFSGNJX_FUNCT6)
+
+  // Vector Single-Width Floating-Point Fused Multiply-Add Instructions
+  DEFINE_OPFVV_FMA(vfmadd, VFMADD_FUNCT6)
+  DEFINE_OPFVF_FMA(vfmadd, VFMADD_FUNCT6)
+  DEFINE_OPFVV_FMA(vfmsub, VFMSUB_FUNCT6)
+  DEFINE_OPFVF_FMA(vfmsub, VFMSUB_FUNCT6)
+  DEFINE_OPFVV_FMA(vfmacc, VFMACC_FUNCT6)
+  DEFINE_OPFVF_FMA(vfmacc, VFMACC_FUNCT6)
+  DEFINE_OPFVV_FMA(vfmsac, VFMSAC_FUNCT6)
+  DEFINE_OPFVF_FMA(vfmsac, VFMSAC_FUNCT6)
+  DEFINE_OPFVV_FMA(vfnmadd, VFNMADD_FUNCT6)
+  DEFINE_OPFVF_FMA(vfnmadd, VFNMADD_FUNCT6)
+  DEFINE_OPFVV_FMA(vfnmsub, VFNMSUB_FUNCT6)
+  DEFINE_OPFVF_FMA(vfnmsub, VFNMSUB_FUNCT6)
+  DEFINE_OPFVV_FMA(vfnmacc, VFNMACC_FUNCT6)
+  DEFINE_OPFVF_FMA(vfnmacc, VFNMACC_FUNCT6)
+  DEFINE_OPFVV_FMA(vfnmsac, VFNMSAC_FUNCT6)
+  DEFINE_OPFVF_FMA(vfnmsac, VFNMSAC_FUNCT6)
+
+  // Vector Narrowing Fixed-Point Clip Instructions
+  DEFINE_OPIVV(vnclip, VNCLIP_FUNCT6)
+  DEFINE_OPIVX(vnclip, VNCLIP_FUNCT6)
+  DEFINE_OPIVI(vnclip, VNCLIP_FUNCT6)
+  DEFINE_OPIVV(vnclipu, VNCLIPU_FUNCT6)
+  DEFINE_OPIVX(vnclipu, VNCLIPU_FUNCT6)
+  DEFINE_OPIVI(vnclipu, VNCLIPU_FUNCT6)
+
+  // Vector Integer Extension
+  DEFINE_OPMVV_VIE(vzext_vf8)
+  DEFINE_OPMVV_VIE(vsext_vf8)
+  DEFINE_OPMVV_VIE(vzext_vf4)
+  DEFINE_OPMVV_VIE(vsext_vf4)
+  DEFINE_OPMVV_VIE(vzext_vf2)
+  DEFINE_OPMVV_VIE(vsext_vf2)
+
 #undef DEFINE_OPIVI
 #undef DEFINE_OPIVV
 #undef DEFINE_OPIVX
 #undef DEFINE_OPMVV
 #undef DEFINE_OPMVX
+#undef DEFINE_OPFVV
+#undef DEFINE_OPFVF
+#undef DEFINE_OPFVV_FMA
+#undef DEFINE_OPFVF_FMA
+#undef DEFINE_OPMVV_VIE
+
+#define DEFINE_VFUNARY(name, funct6, vs1)                          \
+  void name(VRegister vd, VRegister vs2, MaskType mask = NoMask) { \
+    GenInstrV(funct6, OP_FVV, vd, vs1, vs2, mask);                 \
+  }
+
+  DEFINE_VFUNARY(vfcvt_xu_f_v, VFUNARY0_FUNCT6, VFCVT_XU_F_V)
+  DEFINE_VFUNARY(vfcvt_x_f_v, VFUNARY0_FUNCT6, VFCVT_X_F_V)
+  DEFINE_VFUNARY(vfcvt_f_x_v, VFUNARY0_FUNCT6, VFCVT_F_X_V)
+  DEFINE_VFUNARY(vfcvt_f_xu_v, VFUNARY0_FUNCT6, VFCVT_F_XU_V)
+  DEFINE_VFUNARY(vfncvt_f_f_w, VFUNARY0_FUNCT6, VFNCVT_F_F_W)
+
+  DEFINE_VFUNARY(vfclass_v, VFUNARY1_FUNCT6, VFCLASS_V)
+#undef DEFINE_VFUNARY
 
   void vnot_vv(VRegister dst, VRegister src) { vxor_vi(dst, src, -1); }
 
   void vneg_vv(VRegister dst, VRegister src) { vrsub_vx(dst, src, zero_reg); }
+
+  void vfneg_vv(VRegister dst, VRegister src) { vfsngjn_vv(dst, src, src); }
+  void vfabs_vv(VRegister dst, VRegister src) { vfsngjx_vv(dst, src, src); }
   // Privileged
   void uret();
   void sret();
@@ -1166,6 +1259,13 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
       }
     }
 
+    void set(RoundingMode mode) {
+      if (mode_ != mode) {
+        assm_->addi(kScratchReg, zero_reg, mode << kFcsrFrmShift);
+        assm_->fscsr(kScratchReg);
+        mode_ = mode;
+      }
+    }
     void set(Register rd, Register rs1, VSew sew, Vlmul lmul) {
       if (sew != sew_ || lmul != lmul_) {
         sew_ = sew;
@@ -1188,9 +1288,18 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
     Vlmul lmul_ = m1;
     int32_t vl = 0;
     Assembler* assm_;
+    RoundingMode mode_ = RNE;
   };
 
   VectorUnit VU;
+
+  void CheckTrampolinePoolQuick(int extra_instructions = 0) {
+    DEBUG_PRINTF("\tpc_offset:%d %d\n", pc_offset(),
+                 next_buffer_check_ - extra_instructions * kInstrSize);
+    if (pc_offset() >= next_buffer_check_ - extra_instructions * kInstrSize) {
+      CheckTrampolinePool();
+    }
+  }
 
  protected:
   // Readable constants for base and offset adjustment helper, these indicate if
@@ -1269,22 +1378,6 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   }
 
   bool is_buffer_growth_blocked() const { return block_buffer_growth_; }
-
-  void CheckTrampolinePoolQuick(int extra_instructions = 0) {
-    DEBUG_PRINTF("\tpc_offset:%d %d\n", pc_offset(),
-                 next_buffer_check_ - extra_instructions * kInstrSize);
-    if (pc_offset() >= next_buffer_check_ - extra_instructions * kInstrSize) {
-      CheckTrampolinePool();
-    }
-  }
-
-#ifdef DEBUG
-  bool EmbeddedObjectMatches(int pc_offset, Handle<Object> object) {
-    return target_address_at(
-               reinterpret_cast<Address>(buffer_->start() + pc_offset)) ==
-           (IsOnHeap() ? object->ptr() : object.address());
-  }
-#endif
 
  private:
   // Avoid overflows for displacements etc.
@@ -1450,14 +1543,23 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // OPIVV OPFVV OPMVV
   void GenInstrV(uint8_t funct6, Opcode opcode, VRegister vd, VRegister vs1,
                  VRegister vs2, MaskType mask = NoMask);
+  void GenInstrV(uint8_t funct6, Opcode opcode, VRegister vd, int8_t vs1,
+                 VRegister vs2, MaskType mask = NoMask);
+  void GenInstrV(uint8_t funct6, Opcode opcode, VRegister vd, VRegister vs2,
+                 MaskType mask = NoMask);
   // OPMVV OPFVV
   void GenInstrV(uint8_t funct6, Opcode opcode, Register rd, VRegister vs1,
                  VRegister vs2, MaskType mask = NoMask);
-
-  // OPIVX OPFVF OPMVX
-  void GenInstrV(uint8_t funct6, Opcode opcode, VRegister vd, Register rs1,
+  // OPFVV
+  void GenInstrV(uint8_t funct6, Opcode opcode, FPURegister fd, VRegister vs1,
                  VRegister vs2, MaskType mask = NoMask);
 
+  // OPIVX OPMVX
+  void GenInstrV(uint8_t funct6, Opcode opcode, VRegister vd, Register rs1,
+                 VRegister vs2, MaskType mask = NoMask);
+  // OPFVF
+  void GenInstrV(uint8_t funct6, Opcode opcode, VRegister vd, FPURegister fs1,
+                 VRegister vs2, MaskType mask = NoMask);
   // OPMVX
   void GenInstrV(uint8_t funct6, Register rd, Register rs1, VRegister vs2,
                  MaskType mask = NoMask);

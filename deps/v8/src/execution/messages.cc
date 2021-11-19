@@ -261,10 +261,10 @@ MaybeHandle<Object> AppendErrorString(Isolate* isolate, Handle<Object> error,
       DCHECK(isolate->has_pending_exception());
       isolate->clear_pending_exception();
       isolate->set_external_caught_exception(false);
-      builder->AppendCString("<error>");
+      builder->AppendCStringLiteral("<error>");
     } else {
       // Formatted thrown exception successfully, append it.
-      builder->AppendCString("<error: ");
+      builder->AppendCStringLiteral("<error: ");
       builder->AppendString(err_str.ToHandleChecked());
       builder->AppendCharacter('>');
     }
@@ -369,7 +369,7 @@ MaybeHandle<Object> ErrorUtils::FormatStackTrace(Isolate* isolate,
                       Object);
 
   for (int i = 0; i < elems->length(); ++i) {
-    builder.AppendCString("\n    at ");
+    builder.AppendCStringLiteral("\n    at ");
 
     Handle<StackFrameInfo> frame(StackFrameInfo::cast(elems->get(i)), isolate);
     SerializeStackFrameInfo(isolate, frame, &builder);
@@ -389,12 +389,12 @@ MaybeHandle<Object> ErrorUtils::FormatStackTrace(Isolate* isolate,
       if (exception_string.is_null()) {
         // Formatting the thrown exception threw again, give up.
 
-        builder.AppendCString("<error>");
+        builder.AppendCStringLiteral("<error>");
       } else {
         // Formatted thrown exception successfully, append it.
-        builder.AppendCString("<error: ");
+        builder.AppendCStringLiteral("<error: ");
         builder.AppendString(exception_string.ToHandleChecked());
-        builder.AppendCString("<error>");
+        builder.AppendCStringLiteral("<error>");
       }
     }
   }
@@ -658,7 +658,7 @@ MaybeHandle<String> ErrorUtils::ToString(Isolate* isolate,
   // the code unit 0x0020 (SPACE), and msg.
   IncrementalStringBuilder builder(isolate);
   builder.AppendString(name);
-  builder.AppendCString(": ");
+  builder.AppendCStringLiteral(": ");
   builder.AppendString(msg);
 
   Handle<String> result;
@@ -745,7 +745,7 @@ Handle<String> BuildDefaultCallSite(Isolate* isolate, Handle<Object> object) {
 
   builder.AppendString(Object::TypeOf(isolate, object));
   if (object->IsString()) {
-    builder.AppendCString(" \"");
+    builder.AppendCStringLiteral(" \"");
     Handle<String> string = Handle<String>::cast(object);
     // This threshold must be sufficiently far below String::kMaxLength that
     // the {builder}'s result can never exceed that limit.
@@ -756,20 +756,17 @@ Handle<String> BuildDefaultCallSite(Isolate* isolate, Handle<Object> object) {
       string = isolate->factory()->NewProperSubString(string, 0,
                                                       kMaxPrintedStringLength);
       builder.AppendString(string);
-      builder.AppendCString("<...>");
+      builder.AppendCStringLiteral("<...>");
     }
-    builder.AppendCString("\"");
+    builder.AppendCStringLiteral("\"");
   } else if (object->IsNull(isolate)) {
-    builder.AppendCString(" ");
-    builder.AppendString(isolate->factory()->null_string());
+    builder.AppendCStringLiteral(" null");
   } else if (object->IsTrue(isolate)) {
-    builder.AppendCString(" ");
-    builder.AppendString(isolate->factory()->true_string());
+    builder.AppendCStringLiteral(" true");
   } else if (object->IsFalse(isolate)) {
-    builder.AppendCString(" ");
-    builder.AppendString(isolate->factory()->false_string());
+    builder.AppendCStringLiteral(" false");
   } else if (object->IsNumber()) {
-    builder.AppendCString(" ");
+    builder.AppendCharacter(' ');
     builder.AppendString(isolate->factory()->NumberToString(object));
   }
 
@@ -821,11 +818,11 @@ MessageTemplate UpdateErrorTemplate(CallPrinter::ErrorHint hint,
 Handle<JSObject> ErrorUtils::NewIteratorError(Isolate* isolate,
                                               Handle<Object> source) {
   MessageLocation location;
-  CallPrinter::ErrorHint hint = CallPrinter::kNone;
+  CallPrinter::ErrorHint hint = CallPrinter::ErrorHint::kNone;
   Handle<String> callsite = RenderCallSite(isolate, source, &location, &hint);
   MessageTemplate id = MessageTemplate::kNotIterableNoSymbolLoad;
 
-  if (hint == CallPrinter::kNone) {
+  if (hint == CallPrinter::ErrorHint::kNone) {
     Handle<Symbol> iterator_symbol = isolate->factory()->iterator_symbol();
     return isolate->factory()->NewTypeError(id, callsite, iterator_symbol);
   }
@@ -871,7 +868,7 @@ Object ErrorUtils::ThrowSpreadArgError(Isolate* isolate, MessageTemplate id,
 Handle<JSObject> ErrorUtils::NewCalledNonCallableError(Isolate* isolate,
                                                        Handle<Object> source) {
   MessageLocation location;
-  CallPrinter::ErrorHint hint = CallPrinter::kNone;
+  CallPrinter::ErrorHint hint = CallPrinter::ErrorHint::kNone;
   Handle<String> callsite = RenderCallSite(isolate, source, &location, &hint);
   MessageTemplate id = MessageTemplate::kCalledNonCallable;
   id = UpdateErrorTemplate(hint, id);
@@ -881,7 +878,7 @@ Handle<JSObject> ErrorUtils::NewCalledNonCallableError(Isolate* isolate,
 Handle<JSObject> ErrorUtils::NewConstructedNonConstructable(
     Isolate* isolate, Handle<Object> source) {
   MessageLocation location;
-  CallPrinter::ErrorHint hint = CallPrinter::kNone;
+  CallPrinter::ErrorHint hint = CallPrinter::ErrorHint::kNone;
   Handle<String> callsite = RenderCallSite(isolate, source, &location, &hint);
   MessageTemplate id = MessageTemplate::kNotConstructor;
   return isolate->factory()->NewTypeError(id, callsite);
@@ -974,7 +971,6 @@ Object ErrorUtils::ThrowLoadFromNullOrUndefined(Isolate* isolate,
                                                callsite, object);
     }
   } else {
-    Handle<Object> key_handle;
     if (!key.ToHandle(&key_handle) ||
         !maybe_property_name.ToHandle(&property_name)) {
       error = isolate->factory()->NewTypeError(

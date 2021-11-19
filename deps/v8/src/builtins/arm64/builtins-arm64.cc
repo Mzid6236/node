@@ -75,7 +75,7 @@ static void GenerateTailCallToReturnedCode(MacroAssembler* masm,
   }
 
   static_assert(kJavaScriptCallCodeStartRegister == x2, "ABI mismatch");
-  __ JumpCodeObject(x2);
+  __ JumpCodeTObject(x2);
 }
 
 namespace {
@@ -253,8 +253,10 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
       x4, FieldMemOperand(x1, JSFunction::kSharedFunctionInfoOffset));
   __ Ldr(w4, FieldMemOperand(x4, SharedFunctionInfo::kFlagsOffset));
   __ DecodeField<SharedFunctionInfo::FunctionKindBits>(w4);
-  __ JumpIfIsInRange(w4, kDefaultDerivedConstructor, kDerivedConstructor,
-                     &not_create_implicit_receiver);
+  __ JumpIfIsInRange(
+      w4, static_cast<uint32_t>(FunctionKind::kDefaultDerivedConstructor),
+      static_cast<uint32_t>(FunctionKind::kDerivedConstructor),
+      &not_create_implicit_receiver);
 
   // If not derived class constructor: Allocate the new receiver object.
   __ IncrementCounter(masm->isolate()->counters()->constructed_objects(), 1, x4,
@@ -1083,7 +1085,8 @@ static void TailCallRuntimeIfMarkerEquals(MacroAssembler* masm,
                                           Runtime::FunctionId function_id) {
   ASM_CODE_COMMENT(masm);
   Label no_match;
-  __ CompareAndBranch(actual_marker, Operand(expected_marker), ne, &no_match);
+  __ CompareAndBranch(actual_marker, Operand(static_cast<int>(expected_marker)),
+                      ne, &no_match);
   GenerateTailCallToReturnedCode(masm, function_id);
   __ bind(&no_match);
 }
@@ -1891,10 +1894,12 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
   __ Ldr(kJavaScriptCallCodeStartRegister,
          MemOperand(kInterpreterDispatchTableRegister, x1));
 
-  UseScratchRegisterScope temps(masm);
-  temps.Exclude(x17);
-  __ Mov(x17, kJavaScriptCallCodeStartRegister);
-  __ Jump(x17);
+  {
+    UseScratchRegisterScope temps(masm);
+    temps.Exclude(x17);
+    __ Mov(x17, kJavaScriptCallCodeStartRegister);
+    __ Jump(x17);
+  }
 
   __ Bind(&return_from_bytecode_dispatch);
 
@@ -1932,8 +1937,12 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
 
   __ Bind(&trampoline_loaded);
 
-  __ Add(x17, x1, Operand(interpreter_entry_return_pc_offset.value()));
-  __ Br(x17);
+  {
+    UseScratchRegisterScope temps(masm);
+    temps.Exclude(x17);
+    __ Add(x17, x1, Operand(interpreter_entry_return_pc_offset.value()));
+    __ Br(x17);
+  }
 }
 
 void Builtins::Generate_InterpreterEnterAtNextBytecode(MacroAssembler* masm) {
@@ -2646,16 +2655,10 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
   //  -- x0 : the number of arguments
   //  -- x1 : the function to call (checked to be a JSFunction)
   // -----------------------------------
-  __ AssertFunction(x1);
+  __ AssertCallableFunction(x1);
 
-  // See ES6 section 9.2.1 [[Call]] ( thisArgument, argumentsList)
-  // Check that function is not a "classConstructor".
-  Label class_constructor;
   __ LoadTaggedPointerField(
       x2, FieldMemOperand(x1, JSFunction::kSharedFunctionInfoOffset));
-  __ Ldr(w3, FieldMemOperand(x2, SharedFunctionInfo::kFlagsOffset));
-  __ TestAndBranchIfAnySet(w3, SharedFunctionInfo::IsClassConstructorBit::kMask,
-                           &class_constructor);
 
   // Enter the context of the function; ToObject has to run in the function
   // context, and we also need to take the global proxy from the function
@@ -2664,6 +2667,7 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
                             FieldMemOperand(x1, JSFunction::kContextOffset));
   // We need to convert the receiver for non-native sloppy mode functions.
   Label done_convert;
+  __ Ldr(w3, FieldMemOperand(x2, SharedFunctionInfo::kFlagsOffset));
   __ TestAndBranchIfAnySet(w3,
                            SharedFunctionInfo::IsNativeBit::kMask |
                                SharedFunctionInfo::IsStrictBit::kMask,
@@ -2730,15 +2734,6 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
   __ Ldrh(x2,
           FieldMemOperand(x2, SharedFunctionInfo::kFormalParameterCountOffset));
   __ InvokeFunctionCode(x1, no_reg, x2, x0, InvokeType::kJump);
-
-  // The function is a "classConstructor", need to raise an exception.
-  __ Bind(&class_constructor);
-  {
-    FrameScope frame(masm, StackFrame::INTERNAL);
-    __ PushArgument(x1);
-    __ CallRuntime(Runtime::kThrowConstructorNonCallableError);
-    __ Unreachable();
-  }
 }
 
 namespace {
@@ -2905,35 +2900,49 @@ void Builtins::Generate_Call(MacroAssembler* masm, ConvertReceiverMode mode) {
   //  -- x0 : the number of arguments
   //  -- x1 : the target to call (can be any Object).
   // -----------------------------------
+  Register argc = x0;
+  Register target = x1;
+  Register map = x4;
+  Register instance_type = x5;
+  DCHECK(!AreAliased(argc, target, map, instance_type));
 
-  Label non_callable, non_smi;
-  __ JumpIfSmi(x1, &non_callable);
-  __ Bind(&non_smi);
-  __ LoadMap(x4, x1);
-  __ CompareInstanceTypeRange(x4, x5, FIRST_JS_FUNCTION_TYPE,
-                              LAST_JS_FUNCTION_TYPE);
+  Label non_callable, class_constructor;
+  __ JumpIfSmi(target, &non_callable);
+  __ LoadMap(map, target);
+  __ CompareInstanceTypeRange(map, instance_type,
+                              FIRST_CALLABLE_JS_FUNCTION_TYPE,
+                              LAST_CALLABLE_JS_FUNCTION_TYPE);
   __ Jump(masm->isolate()->builtins()->CallFunction(mode),
           RelocInfo::CODE_TARGET, ls);
-  __ Cmp(x5, JS_BOUND_FUNCTION_TYPE);
+  __ Cmp(instance_type, JS_BOUND_FUNCTION_TYPE);
   __ Jump(BUILTIN_CODE(masm->isolate(), CallBoundFunction),
           RelocInfo::CODE_TARGET, eq);
 
   // Check if target has a [[Call]] internal method.
-  __ Ldrb(x4, FieldMemOperand(x4, Map::kBitFieldOffset));
-  __ TestAndBranchIfAllClear(x4, Map::Bits1::IsCallableBit::kMask,
-                             &non_callable);
+  {
+    Register flags = x4;
+    __ Ldrb(flags, FieldMemOperand(map, Map::kBitFieldOffset));
+    map = no_reg;
+    __ TestAndBranchIfAllClear(flags, Map::Bits1::IsCallableBit::kMask,
+                               &non_callable);
+  }
 
   // Check if target is a proxy and call CallProxy external builtin
-  __ Cmp(x5, JS_PROXY_TYPE);
+  __ Cmp(instance_type, JS_PROXY_TYPE);
   __ Jump(BUILTIN_CODE(masm->isolate(), CallProxy), RelocInfo::CODE_TARGET, eq);
+
+  // ES6 section 9.2.1 [[Call]] ( thisArgument, argumentsList)
+  // Check that the function is not a "classConstructor".
+  __ Cmp(instance_type, JS_CLASS_CONSTRUCTOR_TYPE);
+  __ B(eq, &class_constructor);
 
   // 2. Call to something else, which might have a [[Call]] internal method (if
   // not we raise an exception).
   // Overwrite the original receiver with the (original) target.
-  __ Poke(x1, __ ReceiverOperand(x0));
+  __ Poke(target, __ ReceiverOperand(argc));
 
   // Let the "call_as_function_delegate" take care of the rest.
-  __ LoadNativeContextSlot(x1, Context::CALL_AS_FUNCTION_DELEGATE_INDEX);
+  __ LoadNativeContextSlot(target, Context::CALL_AS_FUNCTION_DELEGATE_INDEX);
   __ Jump(masm->isolate()->builtins()->CallFunction(
               ConvertReceiverMode::kNotNullOrUndefined),
           RelocInfo::CODE_TARGET);
@@ -2942,8 +2951,17 @@ void Builtins::Generate_Call(MacroAssembler* masm, ConvertReceiverMode mode) {
   __ bind(&non_callable);
   {
     FrameScope scope(masm, StackFrame::INTERNAL);
-    __ PushArgument(x1);
+    __ PushArgument(target);
     __ CallRuntime(Runtime::kThrowCalledNonCallable);
+    __ Unreachable();
+  }
+
+  // 4. The function is a "classConstructor", need to raise an exception.
+  __ bind(&class_constructor);
+  {
+    FrameScope frame(masm, StackFrame::INTERNAL);
+    __ PushArgument(target);
+    __ CallRuntime(Runtime::kThrowConstructorNonCallableError);
     __ Unreachable();
   }
 }
@@ -3016,31 +3034,41 @@ void Builtins::Generate_Construct(MacroAssembler* masm) {
   //  -- x3 : the new target (either the same as the constructor or
   //          the JSFunction on which new was invoked initially)
   // -----------------------------------
+  Register argc = x0;
+  Register target = x1;
+  Register map = x4;
+  Register instance_type = x5;
+  DCHECK(!AreAliased(argc, target, map, instance_type));
 
   // Check if target is a Smi.
   Label non_constructor, non_proxy;
-  __ JumpIfSmi(x1, &non_constructor);
+  __ JumpIfSmi(target, &non_constructor);
 
   // Check if target has a [[Construct]] internal method.
-  __ LoadTaggedPointerField(x4, FieldMemOperand(x1, HeapObject::kMapOffset));
-  __ Ldrb(x2, FieldMemOperand(x4, Map::kBitFieldOffset));
-  __ TestAndBranchIfAllClear(x2, Map::Bits1::IsConstructorBit::kMask,
-                             &non_constructor);
+  __ LoadTaggedPointerField(map,
+                            FieldMemOperand(target, HeapObject::kMapOffset));
+  {
+    Register flags = x2;
+    DCHECK(!AreAliased(argc, target, map, instance_type, flags));
+    __ Ldrb(flags, FieldMemOperand(map, Map::kBitFieldOffset));
+    __ TestAndBranchIfAllClear(flags, Map::Bits1::IsConstructorBit::kMask,
+                               &non_constructor);
+  }
 
   // Dispatch based on instance type.
-  __ CompareInstanceTypeRange(x4, x5, FIRST_JS_FUNCTION_TYPE,
+  __ CompareInstanceTypeRange(map, instance_type, FIRST_JS_FUNCTION_TYPE,
                               LAST_JS_FUNCTION_TYPE);
   __ Jump(BUILTIN_CODE(masm->isolate(), ConstructFunction),
           RelocInfo::CODE_TARGET, ls);
 
   // Only dispatch to bound functions after checking whether they are
   // constructors.
-  __ Cmp(x5, JS_BOUND_FUNCTION_TYPE);
+  __ Cmp(instance_type, JS_BOUND_FUNCTION_TYPE);
   __ Jump(BUILTIN_CODE(masm->isolate(), ConstructBoundFunction),
           RelocInfo::CODE_TARGET, eq);
 
   // Only dispatch to proxies after checking whether they are constructors.
-  __ Cmp(x5, JS_PROXY_TYPE);
+  __ Cmp(instance_type, JS_PROXY_TYPE);
   __ B(ne, &non_proxy);
   __ Jump(BUILTIN_CODE(masm->isolate(), ConstructProxy),
           RelocInfo::CODE_TARGET);
@@ -3049,10 +3077,11 @@ void Builtins::Generate_Construct(MacroAssembler* masm) {
   __ bind(&non_proxy);
   {
     // Overwrite the original receiver with the (original) target.
-    __ Poke(x1, __ ReceiverOperand(x0));
+    __ Poke(target, __ ReceiverOperand(argc));
 
     // Let the "call_as_constructor_delegate" take care of the rest.
-    __ LoadNativeContextSlot(x1, Context::CALL_AS_CONSTRUCTOR_DELEGATE_INDEX);
+    __ LoadNativeContextSlot(target,
+                             Context::CALL_AS_CONSTRUCTOR_DELEGATE_INDEX);
     __ Jump(masm->isolate()->builtins()->CallFunction(),
             RelocInfo::CODE_TARGET);
   }
@@ -3152,6 +3181,11 @@ void Builtins::Generate_WasmDebugBreak(MacroAssembler* masm) {
 
 void Builtins::Generate_GenericJSToWasmWrapper(MacroAssembler* masm) {
   // TODO(v8:10701): Implement for this platform.
+  __ Trap();
+}
+
+void Builtins::Generate_WasmReturnPromiseOnSuspend(MacroAssembler* masm) {
+  // TODO(v8:12191): Implement for this platform.
   __ Trap();
 }
 
@@ -3774,8 +3808,11 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
   Register js_getter = x4;
   __ LoadTaggedPointerField(
       js_getter, FieldMemOperand(callback, AccessorInfo::kJsGetterOffset));
-  __ Ldr(api_function_address,
-         FieldMemOperand(js_getter, Foreign::kForeignAddressOffset));
+
+  __ LoadExternalPointerField(
+      api_function_address,
+      FieldMemOperand(js_getter, Foreign::kForeignAddressOffset),
+      kForeignForeignAddressTag);
 
   const int spill_offset = 1 + kApiStackSpace;
   // +3 is to skip prolog, return address and name handle.

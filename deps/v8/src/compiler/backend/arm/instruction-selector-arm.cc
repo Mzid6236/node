@@ -498,9 +498,9 @@ void InstructionSelector::VisitStackSlot(Node* node) {
        sequence()->AddImmediate(Constant(slot)), 0, nullptr);
 }
 
-void InstructionSelector::VisitAbortCSAAssert(Node* node) {
+void InstructionSelector::VisitAbortCSADcheck(Node* node) {
   ArmOperandGenerator g(this);
-  Emit(kArchAbortCSAAssert, g.NoOutput(), g.UseFixed(node->InputAt(0), r1));
+  Emit(kArchAbortCSADcheck, g.NoOutput(), g.UseFixed(node->InputAt(0), r1));
 }
 
 void InstructionSelector::VisitStoreLane(Node* node) {
@@ -626,6 +626,7 @@ void InstructionSelector::VisitLoad(Node* node) {
       break;
     case MachineRepresentation::kCompressedPointer:  // Fall through.
     case MachineRepresentation::kCompressed:         // Fall through.
+    case MachineRepresentation::kCagedPointer:       // Fall through.
     case MachineRepresentation::kWord64:             // Fall through.
     case MachineRepresentation::kMapWord:            // Fall through.
     case MachineRepresentation::kNone:
@@ -663,6 +664,7 @@ ArchOpcode GetStoreOpcode(MachineRepresentation rep) {
       return kArmVst1S128;
     case MachineRepresentation::kCompressedPointer:  // Fall through.
     case MachineRepresentation::kCompressed:         // Fall through.
+    case MachineRepresentation::kCagedPointer:       // Fall through.
     case MachineRepresentation::kWord64:             // Fall through.
     case MachineRepresentation::kMapWord:            // Fall through.
     case MachineRepresentation::kNone:

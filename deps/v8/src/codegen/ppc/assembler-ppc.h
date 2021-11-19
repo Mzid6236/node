@@ -196,15 +196,6 @@ class Assembler : public AssemblerBase {
     GetCode(isolate, desc, kNoSafepointTable, kNoHandlerTable);
   }
 
-  // This function is called when on-heap-compilation invariants are
-  // invalidated. For instance, when the assembler buffer grows or a GC happens
-  // between Code object allocation and Code object finalization.
-  void FixOnHeapReferences(bool update_embedded_objects = true);
-
-  // This function is called when we fallback from on-heap to off-heap
-  // compilation and patch on-heap references to handles.
-  void FixOnHeapReferencesToHandles();
-
   void MaybeEmitOutOfLineConstantPool() { EmitConstantPool(); }
 
   inline void CheckTrampolinePoolQuick(int extra_space = 0) {
@@ -976,6 +967,10 @@ class Assembler : public AssemblerBase {
   void bitwise_mov(Register dst, intptr_t value);
   void bitwise_mov32(Register dst, int32_t value);
   void bitwise_add32(Register dst, Register src, int32_t value);
+
+  // Patch the offset to the return address after CallCFunction.
+  void patch_wasm_cpi_return_address(Register dst, int pc_offset,
+                                     int return_address_offset);
 
   // Load the position of the label relative to the generated code object
   // pointer in a register.

@@ -7,6 +7,7 @@
 #include "include/v8-function.h"
 #include "src/api/api-inl.h"
 #include "src/base/utils/random-number-generator.h"
+#include "src/codegen/compiler.h"
 #include "src/codegen/script-details.h"
 #include "src/debug/debug-coverage.h"
 #include "src/debug/debug-evaluate.h"
@@ -17,7 +18,6 @@
 #include "src/objects/js-generator-inl.h"
 #include "src/objects/stack-frame-info-inl.h"
 #include "src/profiler/heap-profiler.h"
-#include "src/regexp/regexp-stack.h"
 #include "src/strings/string-builder-inl.h"
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -70,28 +70,29 @@ Local<String> GetFunctionDescription(Local<Function> function) {
         i::Handle<i::JSBoundFunction>::cast(receiver)));
   }
   if (receiver->IsJSFunction()) {
-    auto function = i::Handle<i::JSFunction>::cast(receiver);
+    auto js_function = i::Handle<i::JSFunction>::cast(receiver);
 #if V8_ENABLE_WEBASSEMBLY
-    if (function->shared().HasWasmExportedFunctionData()) {
-      auto isolate = function->GetIsolate();
+    if (js_function->shared().HasWasmExportedFunctionData()) {
+      auto isolate = js_function->GetIsolate();
       auto func_index =
-          function->shared().wasm_exported_function_data().function_index();
+          js_function->shared().wasm_exported_function_data().function_index();
       auto instance = i::handle(
-          function->shared().wasm_exported_function_data().instance(), isolate);
+          js_function->shared().wasm_exported_function_data().instance(),
+          isolate);
       if (instance->module()->origin == i::wasm::kWasmOrigin) {
         // For asm.js functions, we can still print the source
         // code (hopefully), so don't bother with them here.
         auto debug_name =
             i::GetWasmFunctionDebugName(isolate, instance, func_index);
         i::IncrementalStringBuilder builder(isolate);
-        builder.AppendCString("function ");
+        builder.AppendCStringLiteral("function ");
         builder.AppendString(debug_name);
-        builder.AppendCString("() { [native code] }");
+        builder.AppendCStringLiteral("() { [native code] }");
         return Utils::ToLocal(builder.Finish().ToHandleChecked());
       }
     }
 #endif  // V8_ENABLE_WEBASSEMBLY
-    return Utils::ToLocal(i::JSFunction::ToString(function));
+    return Utils::ToLocal(i::JSFunction::ToString(js_function));
   }
   return Utils::ToLocal(
       receiver->GetIsolate()->factory()->function_native_code_string());
@@ -148,13 +149,13 @@ void CollectPrivateMethodsAndAccessorsFromContext(
 
 }  // namespace
 
-bool GetPrivateMembers(Local<Context> context, Local<Object> value,
+bool GetPrivateMembers(Local<Context> context, Local<Object> object,
                        std::vector<Local<Value>>* names_out,
                        std::vector<Local<Value>>* values_out) {
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(context->GetIsolate());
   LOG_API(isolate, debug, GetPrivateMembers);
   ENTER_V8_NO_SCRIPT_NO_EXCEPTION(isolate);
-  i::Handle<i::JSReceiver> receiver = Utils::OpenHandle(*value);
+  i::Handle<i::JSReceiver> receiver = Utils::OpenHandle(*object);
   i::Handle<i::JSArray> names;
   i::Handle<i::FixedArray> values;
 
@@ -179,8 +180,8 @@ bool GetPrivateMembers(Local<Context> context, Local<Object> value,
           isolate, value, i::Object::GetProperty(isolate, receiver, key),
           false);
 
-      i::Handle<i::Context> context(i::Context::cast(*value), isolate);
-      i::Handle<i::ScopeInfo> scope_info(context->scope_info(), isolate);
+      i::Handle<i::Context> value_context(i::Context::cast(*value), isolate);
+      i::Handle<i::ScopeInfo> scope_info(value_context->scope_info(), isolate);
       // At least one slot contains the brand symbol so it does not count.
       private_entries_count += (scope_info->ContextLocalCount() - 1);
     } else {
@@ -196,8 +197,8 @@ bool GetPrivateMembers(Local<Context> context, Local<Object> value,
     if (shared->is_class_constructor() &&
         shared->has_static_private_methods_or_accessors()) {
       has_static_private_methods_or_accessors = true;
-      i::Handle<i::Context> context(func->context(), isolate);
-      i::Handle<i::ScopeInfo> scope_info(context->scope_info(), isolate);
+      i::Handle<i::Context> func_context(func->context(), isolate);
+      i::Handle<i::ScopeInfo> scope_info(func_context->scope_info(), isolate);
       int local_count = scope_info->ContextLocalCount();
       for (int j = 0; j < local_count; ++j) {
         i::VariableMode mode = scope_info->ContextLocalMode(j);
@@ -218,10 +219,11 @@ bool GetPrivateMembers(Local<Context> context, Local<Object> value,
   values_out->reserve(private_entries_count);
 
   if (has_static_private_methods_or_accessors) {
-    i::Handle<i::Context> context(i::JSFunction::cast(*receiver).context(),
-                                  isolate);
-    CollectPrivateMethodsAndAccessorsFromContext(
-        isolate, context, i::IsStaticFlag::kStatic, names_out, values_out);
+    i::Handle<i::Context> recevier_context(
+        i::JSFunction::cast(*receiver).context(), isolate);
+    CollectPrivateMethodsAndAccessorsFromContext(isolate, recevier_context,
+                                                 i::IsStaticFlag::kStatic,
+                                                 names_out, values_out);
   }
 
   for (int i = 0; i < keys->length(); ++i) {
@@ -234,9 +236,10 @@ bool GetPrivateMembers(Local<Context> context, Local<Object> value,
 
     if (key->is_private_brand()) {
       DCHECK(value->IsContext());
-      i::Handle<i::Context> context(i::Context::cast(*value), isolate);
-      CollectPrivateMethodsAndAccessorsFromContext(
-          isolate, context, i::IsStaticFlag::kNotStatic, names_out, values_out);
+      i::Handle<i::Context> value_context(i::Context::cast(*value), isolate);
+      CollectPrivateMethodsAndAccessorsFromContext(isolate, value_context,
+                                                   i::IsStaticFlag::kNotStatic,
+                                                   names_out, values_out);
     } else {  // Private fields
       i::Handle<i::String> name(
           i::String::cast(i::Symbol::cast(*key).description()), isolate);
@@ -304,10 +307,7 @@ void SetTerminateOnResume(Isolate* v8_isolate) {
 bool CanBreakProgram(Isolate* v8_isolate) {
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
   ENTER_V8_DO_NOT_USE(isolate);
-  // We cannot break a program if we are currently running a regexp.
-  // TODO(yangguo): fix this exception.
-  return !isolate->regexp_stack()->is_in_use() &&
-         isolate->debug()->AllFramesOnStackAreBlackboxed();
+  return isolate->debug()->AllFramesOnStackAreBlackboxed();
 }
 
 Isolate* Script::GetIsolate() const {
@@ -887,9 +887,6 @@ ConsoleCallArguments::ConsoleCallArguments(
           args.length() > 1 ? args.address_of_first_argument() : nullptr,
           args.length() - 1) {}
 
-// Marked V8_DEPRECATED.
-int GetStackFrameId(v8::Local<v8::StackFrame> frame) { return 0; }
-
 v8::Local<v8::StackTrace> GetDetailedStackTrace(
     Isolate* v8_isolate, v8::Local<v8::Object> v8_error) {
   i::Isolate* isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
@@ -1011,10 +1008,10 @@ void GlobalLexicalScopeNames(v8::Local<v8::Context> v8_context,
       context->global_object().native_context().script_context_table(),
       isolate);
   for (int i = 0; i < table->used(kAcquireLoad); i++) {
-    i::Handle<i::Context> context =
+    i::Handle<i::Context> script_context =
         i::ScriptContextTable::GetContext(isolate, table, i);
-    DCHECK(context->IsScriptContext());
-    i::Handle<i::ScopeInfo> scope_info(context->scope_info(), isolate);
+    DCHECK(script_context->IsScriptContext());
+    i::Handle<i::ScopeInfo> scope_info(script_context->scope_info(), isolate);
     int local_count = scope_info->ContextLocalCount();
     for (int j = 0; j < local_count; ++j) {
       i::String name = scope_info->ContextLocalName(j);
@@ -1248,8 +1245,12 @@ MaybeLocal<Message> GetMessageFromPromise(Local<Promise> p) {
       i::Handle<i::JSMessageObject>::cast(maybeMessage));
 }
 
+bool isExperimentalAsyncStackTaggingApiEnabled() {
+  return v8::internal::FLAG_experimental_async_stack_tagging_api;
+}
+
 std::unique_ptr<PropertyIterator> PropertyIterator::Create(
-    Local<Context> context, Local<Object> object) {
+    Local<Context> context, Local<Object> object, bool skip_indices) {
   internal::Isolate* isolate =
       reinterpret_cast<i::Isolate*>(object->GetIsolate());
   if (IsExecutionTerminatingCheck(isolate)) {
@@ -1257,8 +1258,8 @@ std::unique_ptr<PropertyIterator> PropertyIterator::Create(
   }
   CallDepthScope<false> call_depth_scope(isolate, context);
 
-  auto result =
-      i::DebugPropertyIterator::Create(isolate, Utils::OpenHandle(*object));
+  auto result = i::DebugPropertyIterator::Create(
+      isolate, Utils::OpenHandle(*object), skip_indices);
   if (!result) {
     DCHECK(isolate->has_pending_exception());
     call_depth_scope.Escape();

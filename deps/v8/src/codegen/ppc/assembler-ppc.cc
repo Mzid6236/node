@@ -1322,6 +1322,15 @@ void Assembler::bitwise_add32(Register dst, Register src, int32_t value) {
   }
 }
 
+void Assembler::patch_wasm_cpi_return_address(Register dst, int pc_offset,
+                                              int return_address_offset) {
+  DCHECK(is_int16(return_address_offset));
+  Assembler patching_assembler(
+      AssemblerOptions{},
+      ExternalAssemblerBuffer(buffer_start_ + pc_offset, kInstrSize + kGap));
+  patching_assembler.addi(dst, dst, Operand(return_address_offset));
+}
+
 void Assembler::mov_label_offset(Register dst, Label* label) {
   int position = link(label);
   if (label->is_bound()) {
@@ -1928,18 +1937,6 @@ bool Assembler::IsNop(Instr instr, int type) {
       UNIMPLEMENTED();
   }
   return instr == (ORI | reg * B21 | reg * B16);
-}
-
-void Assembler::FixOnHeapReferences(bool update_embedded_objects) {
-  // TODO(v8:11872) This function should never be called if Sparkplug on heap
-  // compilation is not supported.
-  UNREACHABLE();
-}
-
-void Assembler::FixOnHeapReferencesToHandles() {
-  // TODO(v8:11872) This function should never be called if Sparkplug on heap
-  // compilation is not supported.
-  UNREACHABLE();
 }
 
 void Assembler::GrowBuffer(int needed) {

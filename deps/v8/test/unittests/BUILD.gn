@@ -313,6 +313,11 @@ v8_source_set("unittests_sources") {
     "heap/bitmap-test-utils.h",
     "heap/bitmap-unittest.cc",
     "heap/code-object-registry-unittest.cc",
+    "heap/cppgc-js/traced-reference-unittest.cc",
+    "heap/cppgc-js/unified-heap-snapshot-unittest.cc",
+    "heap/cppgc-js/unified-heap-unittest.cc",
+    "heap/cppgc-js/unified-heap-utils.cc",
+    "heap/cppgc-js/unified-heap-utils.h",
     "heap/embedder-tracing-unittest.cc",
     "heap/gc-idle-time-handler-unittest.cc",
     "heap/gc-tracer-unittest.cc",
@@ -333,11 +338,6 @@ v8_source_set("unittests_sources") {
     "heap/safepoint-unittest.cc",
     "heap/slot-set-unittest.cc",
     "heap/spaces-unittest.cc",
-    "heap/traced-reference-unittest.cc",
-    "heap/unified-heap-snapshot-unittest.cc",
-    "heap/unified-heap-unittest.cc",
-    "heap/unified-heap-utils.cc",
-    "heap/unified-heap-utils.h",
     "heap/unmapper-unittest.cc",
     "heap/worklist-unittest.cc",
     "interpreter/bytecode-array-builder-unittest.cc",
@@ -376,6 +376,7 @@ v8_source_set("unittests_sources") {
     "regress/regress-crbug-938251-unittest.cc",
     "run-all-unittests.cc",
     "runtime/runtime-debug-unittest.cc",
+    "security/virtual-memory-cage-unittest.cc",
     "strings/char-predicates-unittest.cc",
     "strings/unicode-unittest.cc",
     "tasks/background-compile-task-unittest.cc",
@@ -493,18 +494,21 @@ v8_source_set("unittests_sources") {
     ]
   }
 
-  if (is_posix && v8_enable_webassembly) {
-    sources += [ "wasm/trap-handler-posix-unittest.cc" ]
-  }
+  if (v8_enable_webassembly) {
+    if (is_posix) {
+      sources += [ "wasm/trap-handler-posix-unittest.cc" ]
+    }
 
-  if (is_win && v8_enable_webassembly) {
-    sources += [ "wasm/trap-handler-win-unittest.cc" ]
-  }
+    if (is_win) {
+      sources += [ "wasm/trap-handler-win-unittest.cc" ]
+    }
 
-  # Include this test only on arm64 simulator builds on x64 on Linux.
-  if (current_cpu == "x64" && v8_current_cpu == "arm64" && is_linux &&
-      v8_enable_webassembly) {
-    sources += [ "wasm/trap-handler-simulator-unittest.cc" ]
+    # Include this test only on arm64 simulator builds on x64 on Linux, Mac and
+    # Windows.
+    if (current_cpu == "x64" && v8_current_cpu == "arm64" &&
+        (is_linux || is_mac || is_win)) {
+      sources += [ "wasm/trap-handler-simulator-unittest.cc" ]
+    }
   }
 
   configs = [
@@ -534,5 +538,7 @@ v8_source_set("unittests_sources") {
     # bytecode-utils.h.
     # C4309: 'static_cast': truncation of constant value
     cflags = [ "/wd4309" ]
+
+    sources += [ "avoid-windows-h-includes.cc" ]
   }
 }

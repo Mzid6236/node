@@ -24,7 +24,7 @@
 #include "src/execution/frames-inl.h"
 #include "src/execution/isolate-inl.h"
 #include "src/execution/v8threads.h"
-#include "src/handles/global-handles.h"
+#include "src/handles/global-handles-inl.h"
 #include "src/heap/heap-inl.h"  // For NextDebuggingId.
 #include "src/init/bootstrapper.h"
 #include "src/interpreter/bytecode-array-iterator.h"
@@ -1179,14 +1179,14 @@ void Debug::PrepareStep(StepAction step_action) {
           return;
         }
 #endif  // V8_ENABLE_WEBASSEMBLY
-        JavaScriptFrame* frame = JavaScriptFrame::cast(frames_it.frame());
+        JavaScriptFrame* js_frame = JavaScriptFrame::cast(frames_it.frame());
         if (last_step_action() == StepInto) {
           // Deoptimize frame to ensure calls are checked for step-in.
-          Deoptimizer::DeoptimizeFunction(frame->function());
+          Deoptimizer::DeoptimizeFunction(js_frame->function());
         }
-        HandleScope scope(isolate_);
+        HandleScope inner_scope(isolate_);
         std::vector<Handle<SharedFunctionInfo>> infos;
-        frame->GetFunctions(&infos);
+        js_frame->GetFunctions(&infos);
         for (; !infos.empty(); current_frame_count--) {
           Handle<SharedFunctionInfo> info = infos.back();
           infos.pop_back();
@@ -1583,7 +1583,16 @@ class SharedFunctionInfoFinder {
     }
 
     if (start_position > target_position_) return;
-    if (target_position_ > shared.EndPosition()) return;
+    if (target_position_ >= shared.EndPosition()) {
+      // The SharedFunctionInfo::EndPosition() is generally exclusive, but there
+      // are assumptions in various places in the debugger that for script level
+      // (toplevel function) there's an end position that is technically outside
+      // the script. It might be worth revisiting the overall design here at
+      // some point in the future.
+      if (!shared.is_toplevel() || target_position_ > shared.EndPosition()) {
+        return;
+      }
+    }
 
     if (!current_candidate_.is_null()) {
       if (current_start_position_ == start_position &&
@@ -1801,7 +1810,7 @@ bool Debug::EnsureBreakInfo(Handle<SharedFunctionInfo> shared) {
   IsCompiledScope is_compiled_scope = shared->is_compiled_scope(isolate_);
   if (!is_compiled_scope.is_compiled() &&
       !Compiler::Compile(isolate_, shared, Compiler::CLEAR_EXCEPTION,
-                         &is_compiled_scope)) {
+                         &is_compiled_scope, CreateSourcePositions::kYes)) {
     return false;
   }
   CreateBreakInfo(shared);
@@ -2151,7 +2160,7 @@ namespace {
 debug::Location GetDebugLocation(Handle<Script> script, int source_position) {
   Script::PositionInfo info;
   Script::GetPositionInfo(script, source_position, &info, Script::WITH_OFFSET);
-  // V8 provides ScriptCompiler::CompileFunctionInContext method which takes
+  // V8 provides ScriptCompiler::CompileFunction method which takes
   // expression and compile it as anonymous function like (function() ..
   // expression ..). To produce correct locations for stmts inside of this
   // expression V8 compile this function with negative offset. Instead of stmt
@@ -2686,6 +2695,18 @@ bool Debug::PerformSideEffectCheckAtBytecode(InterpretedFrame* frame) {
       handle(bytecode_array, isolate_), offset);
 
   Bytecode bytecode = bytecode_iterator.current_bytecode();
+  if (interpreter::Bytecodes::IsCallRuntime(bytecode)) {
+    auto id = (bytecode == Bytecode::kInvokeIntrinsic)
+                  ? bytecode_iterator.GetIntrinsicIdOperand(0)
+                  : bytecode_iterator.GetRuntimeIdOperand(0);
+    if (DebugEvaluate::IsSideEffectFreeIntrinsic(id)) {
+      return true;
+    }
+    side_effect_check_failed_ = true;
+    // Throw an uncatchable termination exception.
+    isolate_->TerminateExecution();
+    return false;
+  }
   interpreter::Register reg;
   switch (bytecode) {
     case Bytecode::kStaCurrentContextSlot:

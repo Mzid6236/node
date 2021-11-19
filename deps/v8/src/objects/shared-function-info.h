@@ -22,7 +22,6 @@
 #include "src/roots/roots.h"
 #include "testing/gtest/include/gtest/gtest_prod.h"  // nogncheck
 #include "torque-generated/bit-fields.h"
-#include "torque-generated/field-offsets.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -49,6 +48,10 @@ using FunctionSig = Signature<ValueType>;
 }  // namespace wasm
 
 #include "torque-generated/src/objects/shared-function-info-tq.inc"
+
+// Defines whether the source positions should be created during function
+// compilation.
+enum class CreateSourcePositions { kNo, kYes };
 
 // Data collected by the pre-parser storing information about scopes and inner
 // functions.
@@ -145,13 +148,7 @@ class UncompiledDataWithPreparseData
 class InterpreterData
     : public TorqueGeneratedInterpreterData<InterpreterData, Struct> {
  public:
-  DECL_ACCESSORS(interpreter_trampoline, Code)
-
-  DECL_PRINTER(InterpreterData)
-
  private:
-  DECL_ACCESSORS(raw_interpreter_trampoline, CodeT)
-
   TQ_OBJECT_CONSTRUCTORS(InterpreterData)
 };
 
@@ -179,7 +176,7 @@ class SharedFunctionInfo
   inline void SetName(String name);
 
   // Get the code object which represents the execution of this function.
-  V8_EXPORT_PRIVATE Code GetCode() const;
+  V8_EXPORT_PRIVATE CodeT GetCode() const;
 
   // Get the abstract code associated with the function, which will either be
   // a Code object or a BytecodeArray.
@@ -196,6 +193,11 @@ class SharedFunctionInfo
                                    HeapObject script_object,
                                    int function_literal_id,
                                    bool reset_preparsed_scope_data = true);
+
+  // Copy the data from another SharedFunctionInfo. Used for copying data into
+  // and out of a placeholder SharedFunctionInfo, for off-thread compilation
+  // which is not allowed to touch a main-thread-visible SharedFunctionInfo.
+  void CopyFrom(SharedFunctionInfo other);
 
   // Layout description of the optimized code map.
   static const int kEntriesStart = 0;
@@ -306,13 +308,13 @@ class SharedFunctionInfo
   inline BytecodeArray GetBytecodeArray(IsolateT* isolate) const;
 
   inline void set_bytecode_array(BytecodeArray bytecode);
-  inline Code InterpreterTrampoline() const;
+  inline CodeT InterpreterTrampoline() const;
   inline bool HasInterpreterData() const;
   inline InterpreterData interpreter_data() const;
   inline void set_interpreter_data(InterpreterData interpreter_data);
   inline bool HasBaselineCode() const;
-  inline Code baseline_code(AcquireLoadTag) const;
-  inline void set_baseline_code(Code baseline_code, ReleaseStoreTag);
+  inline CodeT baseline_code(AcquireLoadTag) const;
+  inline void set_baseline_code(CodeT baseline_code, ReleaseStoreTag);
   inline void FlushBaselineCode();
   inline BytecodeArray GetActiveBytecodeArray() const;
   inline void SetActiveBytecodeArray(BytecodeArray bytecode);
@@ -381,7 +383,7 @@ class SharedFunctionInfo
   //  - a DebugInfo which holds the actual script [HasDebugInfo()].
   DECL_RELEASE_ACQUIRE_ACCESSORS(script_or_debug_info, HeapObject)
 
-  inline HeapObject script() const;
+  DECL_GETTER(script, HeapObject)
   inline void set_script(HeapObject script);
 
   // True if the underlying script was parsed and compiled in REPL mode.
@@ -483,7 +485,7 @@ class SharedFunctionInfo
   inline bool optimization_disabled() const;
 
   // The reason why optimization was disabled.
-  inline BailoutReason disable_optimization_reason() const;
+  inline BailoutReason disabled_optimization_reason() const;
 
   // Disable (further) attempted optimization of all functions sharing this
   // shared function info.
@@ -533,17 +535,19 @@ class SharedFunctionInfo
   inline bool ShouldFlushCode(base::EnumSet<CodeFlushMode> code_flush_mode);
 
   enum Inlineability {
-    kIsInlineable,
     // Different reasons for not being inlineable:
     kHasNoScript,
     kNeedsBinaryCoverage,
-    kHasOptimizationDisabled,
     kIsBuiltin,
     kIsNotUserCode,
     kHasNoBytecode,
     kExceedsBytecodeLimit,
     kMayContainBreakPoints,
+    kHasOptimizationDisabled,
+    // Actually inlineable!
+    kIsInlineable,
   };
+  // Returns the first value that applies (see enum definition for the order).
   template <typename IsolateT>
   Inlineability GetInlineability(IsolateT* isolate, bool is_turboprop) const;
 
@@ -555,7 +559,8 @@ class SharedFunctionInfo
   // TODO(caitp): make this a flag set during parsing
   inline bool has_simple_parameters();
 
-  // Initialize a SharedFunctionInfo from a parsed function literal.
+  // Initialize a SharedFunctionInfo from a parsed or preparsed function
+  // literal.
   template <typename IsolateT>
   static void InitFromFunctionLiteral(IsolateT* isolate,
                                       Handle<SharedFunctionInfo> shared_info,
@@ -570,6 +575,11 @@ class SharedFunctionInfo
   // start position.
   void SetFunctionTokenPosition(int function_token_position,
                                 int start_position);
+
+  static void EnsureBytecodeArrayAvailable(
+      Isolate* isolate, Handle<SharedFunctionInfo> shared_info,
+      IsCompiledScope* is_compiled,
+      CreateSourcePositions flag = CreateSourcePositions::kNo);
 
   inline bool CanCollectSourcePosition(Isolate* isolate);
   static void EnsureSourcePositionsAvailable(
@@ -631,7 +641,7 @@ class SharedFunctionInfo
   STATIC_ASSERT(BailoutReason::kLastErrorMessage <=
                 DisabledOptimizationReasonBits::kMax);
 
-  STATIC_ASSERT(kLastFunctionKind <= FunctionKindBits::kMax);
+  STATIC_ASSERT(FunctionKind::kLastFunctionKind <= FunctionKindBits::kMax);
   STATIC_ASSERT(FunctionSyntaxKind::kLastFunctionSyntaxKind <=
                 FunctionSyntaxKindBits::kMax);
 

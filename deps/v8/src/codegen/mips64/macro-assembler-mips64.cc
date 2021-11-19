@@ -1097,13 +1097,16 @@ void TurboAssembler::Lsa(Register rd, Register rt, Register rs, uint8_t sa,
 
 void TurboAssembler::Dlsa(Register rd, Register rt, Register rs, uint8_t sa,
                           Register scratch) {
-  DCHECK(sa >= 1 && sa <= 31);
+  DCHECK(sa >= 1 && sa <= 63);
   if (kArchVariant == kMips64r6 && sa <= 4) {
     dlsa(rd, rt, rs, sa - 1);
   } else {
     Register tmp = rd == rt ? scratch : rd;
     DCHECK(tmp != rt);
-    dsll(tmp, rs, sa);
+    if (sa <= 31)
+      dsll(tmp, rs, sa);
+    else
+      dsll32(tmp, rs, sa - 32);
     Daddu(rd, rt, tmp);
   }
 }
@@ -1914,19 +1917,6 @@ void TurboAssembler::li(Register rd, Operand j, LiFlags mode) {
     } else {
       li_optimized(rd, j, mode);
     }
-  } else if (IsOnHeap() && RelocInfo::IsEmbeddedObjectMode(j.rmode())) {
-    BlockGrowBufferScope block_growbuffer(this);
-    int offset = pc_offset();
-    Address address = j.immediate();
-    saved_handles_for_raw_object_ptr_.emplace_back(offset, address);
-    Handle<HeapObject> object(reinterpret_cast<Address*>(address));
-    int64_t immediate = object->ptr();
-    RecordRelocInfo(j.rmode(), immediate);
-    lui(rd, (immediate >> 32) & kImm16Mask);
-    ori(rd, rd, (immediate >> 16) & kImm16Mask);
-    dsll(rd, rd, 16);
-    ori(rd, rd, immediate & kImm16Mask);
-    DCHECK(EmbeddedObjectMatches(offset, object));
   } else if (MustUseReg(j.rmode())) {
     int64_t immediate;
     if (j.IsHeapObjectRequest()) {
@@ -4397,7 +4387,7 @@ void TurboAssembler::Call(Register target, Condition cond, Register rs,
     // Emit a nop in the branch delay slot if required.
     if (bd == PROTECT) nop();
   }
-  set_last_call_pc_(pc_);
+  set_pc_for_safepoint();
 }
 
 void MacroAssembler::JumpIfIsInRange(Register value, unsigned lower_limit,
@@ -4603,6 +4593,46 @@ void TurboAssembler::BranchAndLinkLong(Label* L, BranchDelaySlot bdslot) {
     jalr(t8);
     // Emit a nop in the branch delay slot if required.
     if (bdslot == PROTECT) nop();
+  }
+}
+
+void TurboAssembler::DropArguments(Register count, ArgumentsCountType type,
+                                   ArgumentsCountMode mode, Register scratch) {
+  switch (type) {
+    case kCountIsInteger: {
+      Dlsa(sp, sp, count, kPointerSizeLog2);
+      break;
+    }
+    case kCountIsSmi: {
+      STATIC_ASSERT(kSmiTagSize == 1 && kSmiTag == 0);
+      DCHECK_NE(scratch, no_reg);
+      SmiScale(scratch, count, kPointerSizeLog2);
+      Daddu(sp, sp, scratch);
+      break;
+    }
+    case kCountIsBytes: {
+      Daddu(sp, sp, count);
+      break;
+    }
+  }
+  if (mode == kCountExcludesReceiver) {
+    Daddu(sp, sp, kSystemPointerSize);
+  }
+}
+
+void TurboAssembler::DropArgumentsAndPushNewReceiver(Register argc,
+                                                     Register receiver,
+                                                     ArgumentsCountType type,
+                                                     ArgumentsCountMode mode,
+                                                     Register scratch) {
+  DCHECK(!AreAliased(argc, receiver));
+  if (mode == kCountExcludesReceiver) {
+    // Drop arguments without receiver and override old receiver.
+    DropArguments(argc, type, kCountIncludesReceiver, scratch);
+    Sd(receiver, MemOperand(sp));
+  } else {
+    DropArguments(argc, type, mode, scratch);
+    push(receiver);
   }
 }
 
@@ -4875,8 +4905,10 @@ void MacroAssembler::InvokePrologue(Register expected_parameter_count,
 
   // If the expected parameter count is equal to the adaptor sentinel, no need
   // to push undefined value as arguments.
-  Branch(&regular_invoke, eq, expected_parameter_count,
-         Operand(kDontAdaptArgumentsSentinel));
+  if (kDontAdaptArgumentsSentinel != 0) {
+    Branch(&regular_invoke, eq, expected_parameter_count,
+           Operand(kDontAdaptArgumentsSentinel));
+  }
 
   // If overapplication or if the actual argument count is equal to the
   // formal parameter count, no need to push extra undefined values.
@@ -4903,7 +4935,11 @@ void MacroAssembler::InvokePrologue(Register expected_parameter_count,
     Dsubu(t0, t0, Operand(1));
     Daddu(src, src, Operand(kSystemPointerSize));
     Daddu(dest, dest, Operand(kSystemPointerSize));
-    Branch(&copy, ge, t0, Operand(zero_reg));
+    if (kJSArgcIncludesReceiver) {
+      Branch(&copy, gt, t0, Operand(zero_reg));
+    } else {
+      Branch(&copy, ge, t0, Operand(zero_reg));
+    }
   }
 
   // Fill remaining expected arguments with undefined values.
@@ -4921,8 +4957,8 @@ void MacroAssembler::InvokePrologue(Register expected_parameter_count,
 
   bind(&stack_overflow);
   {
-    FrameScope frame(this,
-                     has_frame() ? StackFrame::NONE : StackFrame::INTERNAL);
+    FrameScope frame(
+        this, has_frame() ? StackFrame::NO_FRAME_TYPE : StackFrame::INTERNAL);
     CallRuntime(Runtime::kThrowStackOverflow);
     break_(0xCC);
   }
@@ -4943,8 +4979,8 @@ void MacroAssembler::CheckDebugHook(Register fun, Register new_target,
     // Load receiver to pass it later to DebugOnFunctionCall hook.
     LoadReceiver(t0, actual_parameter_count);
 
-    FrameScope frame(this,
-                     has_frame() ? StackFrame::NONE : StackFrame::INTERNAL);
+    FrameScope frame(
+        this, has_frame() ? StackFrame::NO_FRAME_TYPE : StackFrame::INTERNAL);
     SmiTag(expected_parameter_count);
     Push(expected_parameter_count);
 
@@ -5276,7 +5312,7 @@ void TurboAssembler::Abort(AbortReason reason) {
 
   if (should_abort_hard()) {
     // We don't care if we constructed a frame. Just pretend we did.
-    FrameScope assume_frame(this, StackFrame::NONE);
+    FrameScope assume_frame(this, StackFrame::NO_FRAME_TYPE);
     PrepareCallCFunction(0, a0);
     li(a0, Operand(static_cast<int>(reason)));
     CallCFunction(ExternalReference::abort_with_reason(), 1);
@@ -5289,7 +5325,7 @@ void TurboAssembler::Abort(AbortReason reason) {
   if (!has_frame()) {
     // We don't actually want to generate a pile of code for this, so just
     // claim there is a stack frame, without generating one.
-    FrameScope scope(this, StackFrame::NONE);
+    FrameScope scope(this, StackFrame::NO_FRAME_TYPE);
     Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
   } else {
     Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
@@ -5546,7 +5582,7 @@ void MacroAssembler::JumpIfNotSmi(Register value, Label* not_smi_label,
   Branch(bd, not_smi_label, ne, scratch, Operand(zero_reg));
 }
 
-void MacroAssembler::AssertNotSmi(Register object) {
+void TurboAssembler::AssertNotSmi(Register object) {
   if (FLAG_debug_code) {
     STATIC_ASSERT(kSmiTag == 0);
     UseScratchRegisterScope temps(this);
@@ -5556,7 +5592,7 @@ void MacroAssembler::AssertNotSmi(Register object) {
   }
 }
 
-void MacroAssembler::AssertSmi(Register object) {
+void TurboAssembler::AssertSmi(Register object) {
   if (FLAG_debug_code) {
     STATIC_ASSERT(kSmiTag == 0);
     UseScratchRegisterScope temps(this);
@@ -5997,15 +6033,17 @@ void TurboAssembler::CallCFunctionHelper(Register function,
       li(scratch, ExternalReference::fast_c_call_caller_fp_address(isolate()));
       Sd(zero_reg, MemOperand(scratch));
     }
-  }
 
-  int stack_passed_arguments =
-      CalculateStackPassedWords(num_reg_arguments, num_double_arguments);
+    int stack_passed_arguments =
+        CalculateStackPassedWords(num_reg_arguments, num_double_arguments);
 
-  if (base::OS::ActivationFrameAlignment() > kPointerSize) {
-    Ld(sp, MemOperand(sp, stack_passed_arguments * kPointerSize));
-  } else {
-    Daddu(sp, sp, Operand(stack_passed_arguments * kPointerSize));
+    if (base::OS::ActivationFrameAlignment() > kPointerSize) {
+      Ld(sp, MemOperand(sp, stack_passed_arguments * kPointerSize));
+    } else {
+      Daddu(sp, sp, Operand(stack_passed_arguments * kPointerSize));
+    }
+
+    set_pc_for_safepoint();
   }
 }
 

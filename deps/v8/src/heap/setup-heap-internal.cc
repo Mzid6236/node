@@ -42,6 +42,7 @@
 #include "src/objects/synthetic-module.h"
 #include "src/objects/template-objects-inl.h"
 #include "src/objects/torque-defined-classes-inl.h"
+#include "src/objects/turbofan-types.h"
 #include "src/regexp/regexp.h"
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -506,6 +507,8 @@ bool Heap::CreateInitialMaps() {
             WasmCapiFunctionData::kSize, wasm_capi_function_data)
     IF_WASM(ALLOCATE_MAP, WASM_EXPORTED_FUNCTION_DATA_TYPE,
             WasmExportedFunctionData::kSize, wasm_exported_function_data)
+    IF_WASM(ALLOCATE_MAP, WASM_API_FUNCTION_REF_TYPE, WasmApiFunctionRef::kSize,
+            wasm_api_function_ref)
     IF_WASM(ALLOCATE_MAP, WASM_JS_FUNCTION_DATA_TYPE, WasmJSFunctionData::kSize,
             wasm_js_function_data)
     IF_WASM(ALLOCATE_MAP, WASM_TYPE_INFO_TYPE, WasmTypeInfo::kSize,
@@ -640,7 +643,7 @@ void Heap::CreateApiObjects() {
 }
 
 void Heap::CreateInitialObjects() {
-  HandleScope scope(isolate());
+  HandleScope initial_objects_handle_scope(isolate());
   Factory* factory = isolate()->factory();
   ReadOnlyRoots roots(this);
 
@@ -736,7 +739,7 @@ void Heap::CreateInitialObjects() {
   set_interpreter_entry_trampoline_for_profiling(roots.undefined_value());
 
   {
-    HandleScope scope(isolate());
+    HandleScope handle_scope(isolate());
 #define SYMBOL_INIT(_, name)                                                \
   {                                                                         \
     Handle<Symbol> symbol(                                                  \
@@ -748,7 +751,7 @@ void Heap::CreateInitialObjects() {
   }
 
   {
-    HandleScope scope(isolate());
+    HandleScope handle_scope(isolate());
 #define SYMBOL_INIT(_, name, description)                                \
   Handle<Symbol> name = factory->NewSymbol(AllocationType::kReadOnly);   \
   Handle<String> name##d = factory->InternalizeUtf8String(#description); \
@@ -801,6 +804,9 @@ void Heap::CreateInitialObjects() {
   set_feedback_vectors_for_profiling_tools(roots.undefined_value());
   set_pending_optimize_for_test_bytecode(roots.undefined_value());
   set_shared_wasm_memories(roots.empty_weak_array_list());
+#ifdef V8_ENABLE_WEBASSEMBLY
+  set_active_continuation(roots.undefined_value());
+#endif  // V8_ENABLE_WEBASSEMBLY
 
   set_script_list(roots.empty_weak_array_list());
 

@@ -770,13 +770,13 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArchTableSwitch:
       AssembleArchTableSwitch(instr);
       break;
-    case kArchAbortCSAAssert:
+    case kArchAbortCSADcheck:
       DCHECK(i.InputRegister(0) == a0);
       {
         // We don't actually want to generate a pile of code for this, so just
         // claim there is a stack frame, without generating one.
-        FrameScope scope(tasm(), StackFrame::NONE);
-        __ Call(isolate()->builtins()->code_handle(Builtin::kAbortCSAAssert),
+        FrameScope scope(tasm(), StackFrame::NO_FRAME_TYPE);
+        __ Call(isolate()->builtins()->code_handle(Builtin::kAbortCSADcheck),
                 RelocInfo::CODE_TARGET);
       }
       __ stop();
@@ -1032,14 +1032,12 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     case kMips64And32:
         __ And(i.OutputRegister(), i.InputRegister(0), i.InputOperand(1));
-        __ sll(i.OutputRegister(), i.OutputRegister(), 0x0);
       break;
     case kMips64Or:
       __ Or(i.OutputRegister(), i.InputRegister(0), i.InputOperand(1));
       break;
     case kMips64Or32:
         __ Or(i.OutputRegister(), i.InputRegister(0), i.InputOperand(1));
-        __ sll(i.OutputRegister(), i.OutputRegister(), 0x0);
       break;
     case kMips64Nor:
       if (instr->InputAt(1)->IsRegister()) {
@@ -1052,11 +1050,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kMips64Nor32:
       if (instr->InputAt(1)->IsRegister()) {
         __ Nor(i.OutputRegister(), i.InputRegister(0), i.InputOperand(1));
-        __ sll(i.OutputRegister(), i.OutputRegister(), 0x0);
       } else {
         DCHECK_EQ(0, i.InputOperand(1).immediate());
         __ Nor(i.OutputRegister(), i.InputRegister(0), zero_reg);
-        __ sll(i.OutputRegister(), i.OutputRegister(), 0x0);
       }
       break;
     case kMips64Xor:
@@ -1103,23 +1099,19 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     case kMips64Shr:
       if (instr->InputAt(1)->IsRegister()) {
-        __ sll(i.InputRegister(0), i.InputRegister(0), 0x0);
         __ srlv(i.OutputRegister(), i.InputRegister(0), i.InputRegister(1));
       } else {
         int64_t imm = i.InputOperand(1).immediate();
-        __ sll(i.OutputRegister(), i.InputRegister(0), 0x0);
-        __ srl(i.OutputRegister(), i.OutputRegister(),
+        __ srl(i.OutputRegister(), i.InputRegister(0),
                static_cast<uint16_t>(imm));
       }
       break;
     case kMips64Sar:
       if (instr->InputAt(1)->IsRegister()) {
-        __ sll(i.InputRegister(0), i.InputRegister(0), 0x0);
         __ srav(i.OutputRegister(), i.InputRegister(0), i.InputRegister(1));
       } else {
         int64_t imm = i.InputOperand(1).immediate();
-        __ sll(i.OutputRegister(), i.InputRegister(0), 0x0);
-        __ sra(i.OutputRegister(), i.OutputRegister(),
+        __ sra(i.OutputRegister(), i.InputRegister(0),
                static_cast<uint16_t>(imm));
       }
       break;
@@ -4182,23 +4174,14 @@ void CodeGenerator::AssembleConstructFrame() {
     } else {
       __ StubPrologue(info()->GetOutputStackFrameType());
 #if V8_ENABLE_WEBASSEMBLY
-      if (call_descriptor->IsWasmFunctionCall()) {
+      if (call_descriptor->IsWasmFunctionCall() ||
+          call_descriptor->IsWasmImportWrapper() ||
+          call_descriptor->IsWasmCapiFunction()) {
         __ Push(kWasmInstanceRegister);
-      } else if (call_descriptor->IsWasmImportWrapper() ||
-                 call_descriptor->IsWasmCapiFunction()) {
-        // Wasm import wrappers are passed a tuple in the place of the instance.
-        // Unpack the tuple into the instance and the target callable.
-        // This must be done here in the codegen because it cannot be expressed
-        // properly in the graph.
-        __ ld(kJSFunctionRegister,
-              FieldMemOperand(kWasmInstanceRegister, Tuple2::kValue2Offset));
-        __ ld(kWasmInstanceRegister,
-              FieldMemOperand(kWasmInstanceRegister, Tuple2::kValue1Offset));
-        __ Push(kWasmInstanceRegister);
-        if (call_descriptor->IsWasmCapiFunction()) {
-          // Reserve space for saving the PC later.
-          __ Dsubu(sp, sp, Operand(kSystemPointerSize));
-        }
+      }
+      if (call_descriptor->IsWasmCapiFunction()) {
+        // Reserve space for saving the PC later.
+        __ Dsubu(sp, sp, Operand(kSystemPointerSize));
       }
 #endif  // V8_ENABLE_WEBASSEMBLY
     }
@@ -4354,22 +4337,22 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
   if (drop_jsargs) {
     // We must pop all arguments from the stack (including the receiver). This
     // number of arguments is given by max(1 + argc_reg, parameter_slots).
-    __ Daddu(t0, t0, Operand(1));  // Also pop the receiver.
+    if (!kJSArgcIncludesReceiver) {
+      __ Daddu(t0, t0, Operand(1));  // Also pop the receiver.
+    }
     if (parameter_slots > 1) {
       __ li(kScratchReg, parameter_slots);
       __ slt(kScratchReg2, t0, kScratchReg);
       __ movn(t0, kScratchReg, kScratchReg2);
     }
-    __ dsll(t0, t0, kSystemPointerSizeLog2);
-    __ Daddu(sp, sp, t0);
+    __ Dlsa(sp, sp, t0, kSystemPointerSizeLog2);
   } else if (additional_pop_count->IsImmediate()) {
     int additional_count = g.ToConstant(additional_pop_count).ToInt32();
     __ Drop(parameter_slots + additional_count);
   } else {
     Register pop_reg = g.ToRegister(additional_pop_count);
     __ Drop(parameter_slots);
-    __ dsll(pop_reg, pop_reg, kSystemPointerSizeLog2);
-    __ Daddu(sp, sp, pop_reg);
+    __ Dlsa(sp, sp, pop_reg, kSystemPointerSizeLog2);
   }
   __ Ret();
 }

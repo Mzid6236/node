@@ -19,12 +19,14 @@
 #include "src/execution/execution.h"
 #include "src/execution/frames-inl.h"
 #include "src/execution/isolate.h"
+#include "src/handles/global-handles-inl.h"
 #include "src/handles/handles.h"
 #include "src/heap/factory.h"
 #include "src/init/v8.h"
 #include "src/objects/fixed-array.h"
 #include "src/objects/instance-type.h"
 #include "src/objects/js-promise-inl.h"
+#include "src/objects/managed-inl.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/templates.h"
 #include "src/parsing/parse-info.h"
@@ -178,15 +180,10 @@ Local<String> v8_str(Isolate* isolate, const char* str) {
       thrower->TypeError("Argument 0 must be a WebAssembly." #Type); \
       return {};                                                     \
     }                                                                \
-    Local<Object> obj = Local<Object>::Cast(args[0]);                \
-    return i::Handle<i::Wasm##Type##Object>::cast(                   \
-        v8::Utils::OpenHandle(*obj));                                \
+    return i::Handle<i::Wasm##Type##Object>::cast(arg0);             \
   }
 
 GET_FIRST_ARGUMENT_AS(Module)
-GET_FIRST_ARGUMENT_AS(Memory)
-GET_FIRST_ARGUMENT_AS(Table)
-GET_FIRST_ARGUMENT_AS(Global)
 GET_FIRST_ARGUMENT_AS(Tag)
 
 #undef GET_FIRST_ARGUMENT_AS
@@ -230,6 +227,16 @@ i::wasm::ModuleWireBytes GetFirstArgumentAsBytes(
   }
   if (thrower->error()) return i::wasm::ModuleWireBytes(nullptr, nullptr);
   return i::wasm::ModuleWireBytes(start, start + length);
+}
+
+i::MaybeHandle<i::JSFunction> GetFirstArgumentAsJSFunction(
+    const v8::FunctionCallbackInfo<v8::Value>& args, ErrorThrower* thrower) {
+  i::Handle<i::Object> arg0 = Utils::OpenHandle(*args[0]);
+  if (!arg0->IsJSFunction()) {
+    thrower->TypeError("Argument 0 must be a function");
+    return {};
+  }
+  return i::Handle<i::JSFunction>::cast(arg0);
 }
 
 i::MaybeHandle<i::JSReceiver> GetValueAsImports(Local<Value> arg,
@@ -654,6 +661,25 @@ void WebAssemblyValidate(const v8::FunctionCallbackInfo<v8::Value>& args) {
   return_value.Set(Boolean::New(isolate, validated));
 }
 
+namespace {
+bool TransferPrototype(i::Isolate* isolate, i::Handle<i::JSObject> destination,
+                       i::Handle<i::JSReceiver> source) {
+  i::MaybeHandle<i::HeapObject> maybe_prototype =
+      i::JSObject::GetPrototype(isolate, source);
+  i::Handle<i::HeapObject> prototype;
+  if (maybe_prototype.ToHandle(&prototype)) {
+    Maybe<bool> result = i::JSObject::SetPrototype(destination, prototype,
+                                                   /*from_javascript=*/false,
+                                                   internal::kThrowOnError);
+    if (!result.FromJust()) {
+      DCHECK(isolate->has_pending_exception());
+      return false;
+    }
+  }
+  return true;
+}
+}  // namespace
+
 // new WebAssembly.Module(bytes) -> WebAssembly.Module
 void WebAssemblyModule(const v8::FunctionCallbackInfo<v8::Value>& args) {
   v8::Isolate* isolate = args.GetIsolate();
@@ -679,25 +705,38 @@ void WebAssemblyModule(const v8::FunctionCallbackInfo<v8::Value>& args) {
     return;
   }
   auto enabled_features = i::wasm::WasmFeatures::FromIsolate(i_isolate);
-  i::MaybeHandle<i::Object> module_obj;
+  i::MaybeHandle<i::WasmModuleObject> maybe_module_obj;
   if (is_shared) {
     // Make a copy of the wire bytes to avoid concurrent modification.
     std::unique_ptr<uint8_t[]> copy(new uint8_t[bytes.length()]);
     memcpy(copy.get(), bytes.start(), bytes.length());
     i::wasm::ModuleWireBytes bytes_copy(copy.get(),
                                         copy.get() + bytes.length());
-    module_obj = i::wasm::GetWasmEngine()->SyncCompile(
+    maybe_module_obj = i::wasm::GetWasmEngine()->SyncCompile(
         i_isolate, enabled_features, &thrower, bytes_copy);
   } else {
     // The wire bytes are not shared, OK to use them directly.
-    module_obj = i::wasm::GetWasmEngine()->SyncCompile(
+    maybe_module_obj = i::wasm::GetWasmEngine()->SyncCompile(
         i_isolate, enabled_features, &thrower, bytes);
   }
 
-  if (module_obj.is_null()) return;
+  i::Handle<i::WasmModuleObject> module_obj;
+  if (!maybe_module_obj.ToHandle(&module_obj)) return;
+
+  // The infrastructure for `new Foo` calls allocates an object, which is
+  // available here as {args.This()}. We're going to discard this object
+  // and use {module_obj} instead, but it does have the correct prototype,
+  // which we must harvest from it. This makes a difference when the JS
+  // constructor function wasn't {WebAssembly.Module} directly, but some
+  // subclass: {module_obj} has {WebAssembly.Module}'s prototype at this
+  // point, so we must overwrite that with the correct prototype for {Foo}.
+  if (!TransferPrototype(i_isolate, module_obj,
+                         Utils::OpenHandle(*args.This()))) {
+    return;
+  }
 
   v8::ReturnValue<v8::Value> return_value = args.GetReturnValue();
-  return_value.Set(Utils::ToLocal(module_obj.ToHandleChecked()));
+  return_value.Set(Utils::ToLocal(i::Handle<i::JSObject>::cast(module_obj)));
 }
 
 // WebAssembly.Module.imports(module) -> Array<Import>
@@ -754,37 +793,6 @@ void WebAssemblyModuleCustomSections(
   args.GetReturnValue().Set(Utils::ToLocal(custom_sections));
 }
 
-MaybeLocal<Value> WebAssemblyInstantiateImpl(Isolate* isolate,
-                                             Local<Value> module,
-                                             Local<Value> ffi) {
-  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
-
-  i::MaybeHandle<i::Object> instance_object;
-  {
-    ScheduledErrorThrower thrower(i_isolate, "WebAssembly.Instance()");
-
-    // TODO(ahaas): These checks on the module should not be necessary here They
-    // are just a workaround for https://crbug.com/837417.
-    i::Handle<i::Object> module_obj = Utils::OpenHandle(*module);
-    if (!module_obj->IsWasmModuleObject()) {
-      thrower.TypeError("Argument 0 must be a WebAssembly.Module object");
-      return {};
-    }
-
-    i::MaybeHandle<i::JSReceiver> maybe_imports =
-        GetValueAsImports(ffi, &thrower);
-    if (thrower.error()) return {};
-
-    instance_object = i::wasm::GetWasmEngine()->SyncInstantiate(
-        i_isolate, &thrower, i::Handle<i::WasmModuleObject>::cast(module_obj),
-        maybe_imports, i::MaybeHandle<i::JSArrayBuffer>());
-  }
-
-  DCHECK_EQ(instance_object.is_null(), i_isolate->has_scheduled_exception());
-  if (instance_object.is_null()) return {};
-  return Utils::ToLocal(instance_object.ToHandleChecked());
-}
-
 // new WebAssembly.Instance(module, imports) -> WebAssembly.Instance
 void WebAssemblyInstance(const v8::FunctionCallbackInfo<v8::Value>& args) {
   Isolate* isolate = args.GetIsolate();
@@ -795,23 +803,48 @@ void WebAssemblyInstance(const v8::FunctionCallbackInfo<v8::Value>& args) {
   HandleScope scope(args.GetIsolate());
   if (i_isolate->wasm_instance_callback()(args)) return;
 
-  ScheduledErrorThrower thrower(i_isolate, "WebAssembly.Instance()");
-  if (!args.IsConstructCall()) {
-    thrower.TypeError("WebAssembly.Instance must be invoked with 'new'");
+  i::MaybeHandle<i::JSObject> maybe_instance_obj;
+  {
+    ScheduledErrorThrower thrower(i_isolate, "WebAssembly.Instance()");
+    if (!args.IsConstructCall()) {
+      thrower.TypeError("WebAssembly.Instance must be invoked with 'new'");
+      return;
+    }
+
+    i::MaybeHandle<i::WasmModuleObject> maybe_module =
+        GetFirstArgumentAsModule(args, &thrower);
+    if (thrower.error()) return;
+
+    i::Handle<i::WasmModuleObject> module_obj = maybe_module.ToHandleChecked();
+
+    i::MaybeHandle<i::JSReceiver> maybe_imports =
+        GetValueAsImports(args[1], &thrower);
+    if (thrower.error()) return;
+
+    maybe_instance_obj = i::wasm::GetWasmEngine()->SyncInstantiate(
+        i_isolate, &thrower, module_obj, maybe_imports,
+        i::MaybeHandle<i::JSArrayBuffer>());
+  }
+
+  i::Handle<i::JSObject> instance_obj;
+  if (!maybe_instance_obj.ToHandle(&instance_obj)) {
+    DCHECK(i_isolate->has_scheduled_exception());
     return;
   }
 
-  GetFirstArgumentAsModule(args, &thrower);
-  if (thrower.error()) return;
-
-  // If args.Length < 2, this will be undefined - see FunctionCallbackInfo.
-  // We'll check for that in WebAssemblyInstantiateImpl.
-  Local<Value> data = args[1];
-
-  Local<Value> instance;
-  if (WebAssemblyInstantiateImpl(isolate, args[0], data).ToLocal(&instance)) {
-    args.GetReturnValue().Set(instance);
+  // The infrastructure for `new Foo` calls allocates an object, which is
+  // available here as {args.This()}. We're going to discard this object
+  // and use {instance_obj} instead, but it does have the correct prototype,
+  // which we must harvest from it. This makes a difference when the JS
+  // constructor function wasn't {WebAssembly.Instance} directly, but some
+  // subclass: {instance_obj} has {WebAssembly.Instance}'s prototype at this
+  // point, so we must overwrite that with the correct prototype for {Foo}.
+  if (!TransferPrototype(i_isolate, instance_obj,
+                         Utils::OpenHandle(*args.This()))) {
+    return;
   }
+
+  args.GetReturnValue().Set(Utils::ToLocal(instance_obj));
 }
 
 // WebAssembly.instantiateStreaming(Response | Promise<Response> [, imports])
@@ -1032,7 +1065,7 @@ bool GetOptionalIntegerProperty(v8::Isolate* isolate, ErrorThrower* thrower,
 }
 
 // Fetch 'initial' or 'minimum' property from object. If both are provided,
-// 'initial' is used.
+// a TypeError is thrown.
 // TODO(aseemgarg): change behavior when the following bug is resolved:
 // https://github.com/WebAssembly/js-types/issues/6
 bool GetInitialOrMinimumProperty(v8::Isolate* isolate, ErrorThrower* thrower,
@@ -1045,12 +1078,26 @@ bool GetInitialOrMinimumProperty(v8::Isolate* isolate, ErrorThrower* thrower,
                                   result, lower_bound, upper_bound)) {
     return false;
   }
-  auto enabled_features = i::wasm::WasmFeatures::FromFlags();
-  if (!has_initial && enabled_features.has_type_reflection()) {
+  auto enabled_features = i::wasm::WasmFeatures::FromIsolate(
+      reinterpret_cast<i::Isolate*>(isolate));
+  if (enabled_features.has_type_reflection()) {
+    bool has_minimum = false;
+    int64_t minimum = 0;
     if (!GetOptionalIntegerProperty(isolate, thrower, context, object,
-                                    v8_str(isolate, "minimum"), &has_initial,
-                                    result, lower_bound, upper_bound)) {
+                                    v8_str(isolate, "minimum"), &has_minimum,
+                                    &minimum, lower_bound, upper_bound)) {
       return false;
+    }
+    if (has_initial && has_minimum) {
+      thrower->TypeError(
+          "The properties 'initial' and 'minimum' are not allowed at the same "
+          "time");
+      return false;
+    }
+    if (has_minimum) {
+      // Only {minimum} exists, so we use {minimum} as {initial}.
+      has_initial = true;
+      *result = minimum;
     }
   }
   if (!has_initial) {
@@ -1060,6 +1107,19 @@ bool GetInitialOrMinimumProperty(v8::Isolate* isolate, ErrorThrower* thrower,
   }
   return true;
 }
+
+namespace {
+i::Handle<i::Object> DefaultReferenceValue(i::Isolate* isolate,
+                                           i::wasm::ValueType type) {
+  if (type == i::wasm::kWasmFuncRef) {
+    return isolate->factory()->null_value();
+  }
+  if (type.is_reference()) {
+    return isolate->factory()->undefined_value();
+  }
+  UNREACHABLE();
+}
+}  // namespace
 
 // new WebAssembly.Table(args) -> WebAssembly.Table
 void WebAssemblyTable(const v8::FunctionCallbackInfo<v8::Value>& args) {
@@ -1086,7 +1146,7 @@ void WebAssemblyTable(const v8::FunctionCallbackInfo<v8::Value>& args) {
     if (!maybe.ToLocal(&value)) return;
     v8::Local<v8::String> string;
     if (!value->ToString(context).ToLocal(&string)) return;
-    auto enabled_features = i::wasm::WasmFeatures::FromFlags();
+    auto enabled_features = i::wasm::WasmFeatures::FromIsolate(i_isolate);
     // The JS api uses 'anyfunc' instead of 'funcref'.
     if (string->StringEquals(v8_str(isolate, "anyfunc"))) {
       type = i::wasm::kWasmFuncRef;
@@ -1120,7 +1180,20 @@ void WebAssemblyTable(const v8::FunctionCallbackInfo<v8::Value>& args) {
   i::Handle<i::WasmTableObject> table_obj =
       i::WasmTableObject::New(i_isolate, i::Handle<i::WasmInstanceObject>(),
                               type, static_cast<uint32_t>(initial), has_maximum,
-                              static_cast<uint32_t>(maximum), &fixed_array);
+                              static_cast<uint32_t>(maximum), &fixed_array,
+                              DefaultReferenceValue(i_isolate, type));
+
+  // The infrastructure for `new Foo` calls allocates an object, which is
+  // available here as {args.This()}. We're going to discard this object
+  // and use {table_obj} instead, but it does have the correct prototype,
+  // which we must harvest from it. This makes a difference when the JS
+  // constructor function wasn't {WebAssembly.Table} directly, but some
+  // subclass: {table_obj} has {WebAssembly.Table}'s prototype at this
+  // point, so we must overwrite that with the correct prototype for {Foo}.
+  if (!TransferPrototype(i_isolate, table_obj,
+                         Utils::OpenHandle(*args.This()))) {
+    return;
+  }
 
   if (initial > 0 && args.Length() >= 2 && !args[1]->IsUndefined()) {
     i::Handle<i::Object> element = Utils::OpenHandle(*args[1]);
@@ -1198,6 +1271,19 @@ void WebAssemblyMemory(const v8::FunctionCallbackInfo<v8::Value>& args) {
     thrower.RangeError("could not allocate memory");
     return;
   }
+
+  // The infrastructure for `new Foo` calls allocates an object, which is
+  // available here as {args.This()}. We're going to discard this object
+  // and use {memory_obj} instead, but it does have the correct prototype,
+  // which we must harvest from it. This makes a difference when the JS
+  // constructor function wasn't {WebAssembly.Memory} directly, but some
+  // subclass: {memory_obj} has {WebAssembly.Memory}'s prototype at this
+  // point, so we must overwrite that with the correct prototype for {Foo}.
+  if (!TransferPrototype(i_isolate, memory_obj,
+                         Utils::OpenHandle(*args.This()))) {
+    return;
+  }
+
   if (shared == i::SharedFlag::kShared) {
     i::Handle<i::JSArrayBuffer> buffer(
         i::Handle<i::WasmMemoryObject>::cast(memory_obj)->array_buffer(),
@@ -1348,6 +1434,18 @@ void WebAssemblyGlobal(const v8::FunctionCallbackInfo<v8::Value>& args) {
   i::Handle<i::WasmGlobalObject> global_obj;
   if (!maybe_global_obj.ToHandle(&global_obj)) {
     thrower.RangeError("could not allocate memory");
+    return;
+  }
+
+  // The infrastructure for `new Foo` calls allocates an object, which is
+  // available here as {args.This()}. We're going to discard this object
+  // and use {global_obj} instead, but it does have the correct prototype,
+  // which we must harvest from it. This makes a difference when the JS
+  // constructor function wasn't {WebAssembly.Global} directly, but some
+  // subclass: {global_obj} has {WebAssembly.Global}'s prototype at this
+  // point, so we must overwrite that with the correct prototype for {Foo}.
+  if (!TransferPrototype(i_isolate, global_obj,
+                         Utils::OpenHandle(*args.This()))) {
     return;
   }
 
@@ -1511,6 +1609,34 @@ void WebAssemblyTag(const v8::FunctionCallbackInfo<v8::Value>& args) {
   i::Handle<i::JSObject> tag_object =
       i::WasmTagObject::New(i_isolate, &sig, tag);
   args.GetReturnValue().Set(Utils::ToLocal(tag_object));
+}
+
+// WebAssembly.Suspender
+void WebAssemblySuspender(const v8::FunctionCallbackInfo<v8::Value>& args) {
+  v8::Isolate* isolate = args.GetIsolate();
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+  HandleScope scope(isolate);
+
+  ScheduledErrorThrower thrower(i_isolate, "WebAssembly.Suspender()");
+  if (!args.IsConstructCall()) {
+    thrower.TypeError("WebAssembly.Suspender must be invoked with 'new'");
+    return;
+  }
+
+  i::Handle<i::JSObject> suspender = i::WasmSuspenderObject::New(i_isolate);
+
+  // The infrastructure for `new Foo` calls allocates an object, which is
+  // available here as {args.This()}. We're going to discard this object
+  // and use {suspender} instead, but it does have the correct prototype,
+  // which we must harvest from it. This makes a difference when the JS
+  // constructor function wasn't {WebAssembly.Suspender} directly, but some
+  // subclass: {suspender} has {WebAssembly.Suspender}'s prototype at this
+  // point, so we must overwrite that with the correct prototype for {Foo}.
+  if (!TransferPrototype(i_isolate, suspender,
+                         Utils::OpenHandle(*args.This()))) {
+    return;
+  }
+  args.GetReturnValue().Set(Utils::ToLocal(suspender));
 }
 
 namespace {
@@ -1835,16 +1961,16 @@ void WebAssemblyTableGrow(const v8::FunctionCallbackInfo<v8::Value>& args) {
     return;
   }
 
-  i::Handle<i::Object> init_value = i_isolate->factory()->null_value();
-  auto enabled_features = i::wasm::WasmFeatures::FromIsolate(i_isolate);
-  if (enabled_features.has_typed_funcref()) {
-    if (args.Length() >= 2 && !args[1]->IsUndefined()) {
-      init_value = Utils::OpenHandle(*args[1]);
-    }
+  i::Handle<i::Object> init_value;
+
+  if (args.Length() >= 2 && !args[1]->IsUndefined()) {
+    init_value = Utils::OpenHandle(*args[1]);
     if (!i::WasmTableObject::IsValidElement(i_isolate, receiver, init_value)) {
       thrower.TypeError("Argument 1 must be a valid type for the table");
       return;
     }
+  } else {
+    init_value = DefaultReferenceValue(i_isolate, receiver->type());
   }
 
   int old_size =
@@ -1902,7 +2028,12 @@ void WebAssemblyTableSet(const v8::FunctionCallbackInfo<v8::Value>& args) {
     return;
   }
 
-  i::Handle<i::Object> element = Utils::OpenHandle(*args[1]);
+  i::Handle<i::Object> element;
+  if (args.Length() >= 2) {
+    element = Utils::OpenHandle(*args[1]);
+  } else {
+    element = DefaultReferenceValue(i_isolate, table_object->type());
+  }
   if (!i::WasmTableObject::IsValidElement(i_isolate, table_object, element)) {
     thrower.TypeError(
         "Argument 1 must be null or a WebAssembly function of type compatible "
@@ -1912,16 +2043,14 @@ void WebAssemblyTableSet(const v8::FunctionCallbackInfo<v8::Value>& args) {
   i::WasmTableObject::Set(i_isolate, table_object, index, element);
 }
 
-// WebAssembly.Table.type(WebAssembly.Table) -> TableType
+// WebAssembly.Table.type() -> TableType
 void WebAssemblyTableType(const v8::FunctionCallbackInfo<v8::Value>& args) {
   v8::Isolate* isolate = args.GetIsolate();
   HandleScope scope(isolate);
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
   ScheduledErrorThrower thrower(i_isolate, "WebAssembly.Table.type()");
 
-  auto maybe_table = GetFirstArgumentAsTable(args, &thrower);
-  if (thrower.error()) return;
-  i::Handle<i::WasmTableObject> table = maybe_table.ToHandleChecked();
+  EXTRACT_THIS(table, WasmTableObject);
   base::Optional<uint32_t> max_size;
   if (!table->maximum_length().IsUndefined()) {
     uint64_t max_size64 = table->maximum_length().Number();
@@ -1994,16 +2123,14 @@ void WebAssemblyMemoryGetBuffer(
   return_value.Set(Utils::ToLocal(buffer));
 }
 
-// WebAssembly.Memory.type(WebAssembly.Memory) -> MemoryType
+// WebAssembly.Memory.type() -> MemoryType
 void WebAssemblyMemoryType(const v8::FunctionCallbackInfo<v8::Value>& args) {
   v8::Isolate* isolate = args.GetIsolate();
   HandleScope scope(isolate);
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
   ScheduledErrorThrower thrower(i_isolate, "WebAssembly.Memory.type()");
 
-  auto maybe_memory = GetFirstArgumentAsMemory(args, &thrower);
-  if (thrower.error()) return;
-  i::Handle<i::WasmMemoryObject> memory = maybe_memory.ToHandleChecked();
+  EXTRACT_THIS(memory, WasmMemoryObject);
   i::Handle<i::JSArrayBuffer> buffer(memory->array_buffer(), i_isolate);
   size_t curr_size = buffer->byte_length() / i::wasm::kWasmPageSize;
   DCHECK_LE(curr_size, std::numeric_limits<uint32_t>::max());
@@ -2014,7 +2141,8 @@ void WebAssemblyMemoryType(const v8::FunctionCallbackInfo<v8::Value>& args) {
     DCHECK_LE(max_size64, std::numeric_limits<uint32_t>::max());
     max_size.emplace(static_cast<uint32_t>(max_size64));
   }
-  auto type = i::wasm::GetTypeForMemory(i_isolate, min_size, max_size);
+  bool shared = buffer->is_shared();
+  auto type = i::wasm::GetTypeForMemory(i_isolate, min_size, max_size, shared);
   args.GetReturnValue().Set(Utils::ToLocal(type));
 }
 
@@ -2360,19 +2488,50 @@ void WebAssemblyGlobalSetValue(
   }
 }
 
-// WebAssembly.Global.type(WebAssembly.Global) -> GlobalType
+// WebAssembly.Global.type() -> GlobalType
 void WebAssemblyGlobalType(const v8::FunctionCallbackInfo<v8::Value>& args) {
   v8::Isolate* isolate = args.GetIsolate();
   HandleScope scope(isolate);
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
   ScheduledErrorThrower thrower(i_isolate, "WebAssembly.Global.type()");
 
-  auto maybe_global = GetFirstArgumentAsGlobal(args, &thrower);
-  if (thrower.error()) return;
-  i::Handle<i::WasmGlobalObject> global = maybe_global.ToHandleChecked();
+  EXTRACT_THIS(global, WasmGlobalObject);
   auto type = i::wasm::GetTypeForGlobal(i_isolate, global->is_mutable(),
                                         global->type());
   args.GetReturnValue().Set(Utils::ToLocal(type));
+}
+
+// WebAssembly.Suspender.returnPromiseOnSuspend(WebAssembly.Function) ->
+// WebAssembly.Function
+void WebAssemblySuspenderReturnPromiseOnSuspend(
+    const v8::FunctionCallbackInfo<v8::Value>& args) {
+  Isolate* isolate = args.GetIsolate();
+  HandleScope scope(isolate);
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+  ScheduledErrorThrower thrower(
+      i_isolate, "WebAssembly.Suspender.returnPromiseOnSuspend()");
+  if (args.Length() == 0) {
+    thrower.TypeError("Argument 0 is required");
+    return;
+  }
+  auto maybe_function = GetFirstArgumentAsJSFunction(args, &thrower);
+  if (thrower.error()) return;
+  i::Handle<i::JSFunction> function = maybe_function.ToHandleChecked();
+  i::SharedFunctionInfo sfi = function->shared();
+  if (!sfi.HasWasmExportedFunctionData()) {
+    thrower.TypeError("Argument 0 must be a wasm function");
+  }
+  i::WasmExportedFunctionData data = sfi.wasm_exported_function_data();
+  int index = data.function_index();
+  i::Handle<i::WasmInstanceObject> instance(
+      i::WasmInstanceObject::cast(data.ref()), i_isolate);
+  i::Handle<i::Code> wrapper = i_isolate->builtins()->code_handle(
+      i::Builtin::kWasmReturnPromiseOnSuspend);
+  i::Handle<i::JSObject> result =
+      i::Handle<i::WasmExternalFunction>::cast(i::WasmExportedFunction::New(
+          i_isolate, instance, index,
+          static_cast<int>(data.sig()->parameter_count()), wrapper));
+  args.GetReturnValue().Set(Utils::ToLocal(result));
 }
 
 }  // namespace
@@ -2482,6 +2641,26 @@ void SetDummyInstanceTemplate(Isolate* isolate, Handle<JSFunction> fun) {
       instance_template);
 }
 
+Handle<JSObject> SetupConstructor(Isolate* isolate,
+                                  Handle<JSFunction> constructor,
+                                  InstanceType instance_type, int instance_size,
+                                  const char* name = nullptr) {
+  SetDummyInstanceTemplate(isolate, constructor);
+  JSFunction::EnsureHasInitialMap(constructor);
+  Handle<JSObject> proto(JSObject::cast(constructor->instance_prototype()),
+                         isolate);
+  Handle<Map> map = isolate->factory()->NewMap(instance_type, instance_size);
+  JSFunction::SetInitialMap(isolate, constructor, map, proto);
+  constexpr PropertyAttributes ro_attributes =
+      static_cast<PropertyAttributes>(DONT_ENUM | READ_ONLY);
+  if (name) {
+    JSObject::AddProperty(isolate, proto,
+                          isolate->factory()->to_string_tag_symbol(),
+                          v8_str(isolate, name), ro_attributes);
+  }
+  return proto;
+}
+
 // static
 void WasmJs::Install(Isolate* isolate, bool exposed_on_global_object) {
   Handle<JSGlobalObject> global = isolate->global_object();
@@ -2535,15 +2714,9 @@ void WasmJs::Install(Isolate* isolate, bool exposed_on_global_object) {
   // Setup Module
   Handle<JSFunction> module_constructor =
       InstallConstructorFunc(isolate, webassembly, "Module", WebAssemblyModule);
+  SetupConstructor(isolate, module_constructor, i::WASM_MODULE_OBJECT_TYPE,
+                   WasmModuleObject::kHeaderSize, "WebAssembly.Module");
   context->set_wasm_module_constructor(*module_constructor);
-  SetDummyInstanceTemplate(isolate, module_constructor);
-  JSFunction::EnsureHasInitialMap(module_constructor);
-  Handle<JSObject> module_proto(
-      JSObject::cast(module_constructor->instance_prototype()), isolate);
-  Handle<Map> module_map = isolate->factory()->NewMap(
-      i::WASM_MODULE_OBJECT_TYPE, WasmModuleObject::kHeaderSize);
-  JSFunction::SetInitialMap(isolate, module_constructor, module_map,
-                            module_proto);
   InstallFunc(isolate, module_constructor, "imports", WebAssemblyModuleImports,
               1, false, NONE, SideEffectType::kHasNoSideEffect);
   InstallFunc(isolate, module_constructor, "exports", WebAssemblyModuleExports,
@@ -2551,26 +2724,16 @@ void WasmJs::Install(Isolate* isolate, bool exposed_on_global_object) {
   InstallFunc(isolate, module_constructor, "customSections",
               WebAssemblyModuleCustomSections, 2, false, NONE,
               SideEffectType::kHasNoSideEffect);
-  JSObject::AddProperty(isolate, module_proto, factory->to_string_tag_symbol(),
-                        v8_str(isolate, "WebAssembly.Module"), ro_attributes);
 
   // Setup Instance
   Handle<JSFunction> instance_constructor = InstallConstructorFunc(
       isolate, webassembly, "Instance", WebAssemblyInstance);
+  Handle<JSObject> instance_proto = SetupConstructor(
+      isolate, instance_constructor, i::WASM_INSTANCE_OBJECT_TYPE,
+      WasmInstanceObject::kHeaderSize, "WebAssembly.Instance");
   context->set_wasm_instance_constructor(*instance_constructor);
-  SetDummyInstanceTemplate(isolate, instance_constructor);
-  JSFunction::EnsureHasInitialMap(instance_constructor);
-  Handle<JSObject> instance_proto(
-      JSObject::cast(instance_constructor->instance_prototype()), isolate);
-  Handle<Map> instance_map = isolate->factory()->NewMap(
-      i::WASM_INSTANCE_OBJECT_TYPE, WasmInstanceObject::kHeaderSize);
-  JSFunction::SetInitialMap(isolate, instance_constructor, instance_map,
-                            instance_proto);
   InstallGetter(isolate, instance_proto, "exports",
                 WebAssemblyInstanceGetExports);
-  JSObject::AddProperty(isolate, instance_proto,
-                        factory->to_string_tag_symbol(),
-                        v8_str(isolate, "WebAssembly.Instance"), ro_attributes);
 
   // The context is not set up completely yet. That's why we cannot use
   // {WasmFeatures::FromIsolate} and have to use {WasmFeatures::FromFlags}
@@ -2580,86 +2743,62 @@ void WasmJs::Install(Isolate* isolate, bool exposed_on_global_object) {
   // Setup Table
   Handle<JSFunction> table_constructor =
       InstallConstructorFunc(isolate, webassembly, "Table", WebAssemblyTable);
+  Handle<JSObject> table_proto =
+      SetupConstructor(isolate, table_constructor, i::WASM_TABLE_OBJECT_TYPE,
+                       WasmTableObject::kHeaderSize, "WebAssembly.Table");
   context->set_wasm_table_constructor(*table_constructor);
-  SetDummyInstanceTemplate(isolate, table_constructor);
-  JSFunction::EnsureHasInitialMap(table_constructor);
-  Handle<JSObject> table_proto(
-      JSObject::cast(table_constructor->instance_prototype()), isolate);
-  Handle<Map> table_map = isolate->factory()->NewMap(
-      i::WASM_TABLE_OBJECT_TYPE, WasmTableObject::kHeaderSize);
-  JSFunction::SetInitialMap(isolate, table_constructor, table_map, table_proto);
   InstallGetter(isolate, table_proto, "length", WebAssemblyTableGetLength);
   InstallFunc(isolate, table_proto, "grow", WebAssemblyTableGrow, 1);
   InstallFunc(isolate, table_proto, "get", WebAssemblyTableGet, 1, false, NONE,
               SideEffectType::kHasNoSideEffect);
   InstallFunc(isolate, table_proto, "set", WebAssemblyTableSet, 2);
   if (enabled_features.has_type_reflection()) {
-    InstallFunc(isolate, table_constructor, "type", WebAssemblyTableType, 1);
+    InstallFunc(isolate, table_proto, "type", WebAssemblyTableType, 0, false,
+                NONE, SideEffectType::kHasNoSideEffect);
   }
-  JSObject::AddProperty(isolate, table_proto, factory->to_string_tag_symbol(),
-                        v8_str(isolate, "WebAssembly.Table"), ro_attributes);
 
   // Setup Memory
   Handle<JSFunction> memory_constructor =
       InstallConstructorFunc(isolate, webassembly, "Memory", WebAssemblyMemory);
+  Handle<JSObject> memory_proto =
+      SetupConstructor(isolate, memory_constructor, i::WASM_MEMORY_OBJECT_TYPE,
+                       WasmMemoryObject::kHeaderSize, "WebAssembly.Memory");
   context->set_wasm_memory_constructor(*memory_constructor);
-  SetDummyInstanceTemplate(isolate, memory_constructor);
-  JSFunction::EnsureHasInitialMap(memory_constructor);
-  Handle<JSObject> memory_proto(
-      JSObject::cast(memory_constructor->instance_prototype()), isolate);
-  Handle<Map> memory_map = isolate->factory()->NewMap(
-      i::WASM_MEMORY_OBJECT_TYPE, WasmMemoryObject::kHeaderSize);
-  JSFunction::SetInitialMap(isolate, memory_constructor, memory_map,
-                            memory_proto);
   InstallFunc(isolate, memory_proto, "grow", WebAssemblyMemoryGrow, 1);
   InstallGetter(isolate, memory_proto, "buffer", WebAssemblyMemoryGetBuffer);
   if (enabled_features.has_type_reflection()) {
-    InstallFunc(isolate, memory_constructor, "type", WebAssemblyMemoryType, 1);
+    InstallFunc(isolate, memory_proto, "type", WebAssemblyMemoryType, 0, false,
+                NONE, SideEffectType::kHasNoSideEffect);
   }
-  JSObject::AddProperty(isolate, memory_proto, factory->to_string_tag_symbol(),
-                        v8_str(isolate, "WebAssembly.Memory"), ro_attributes);
 
   // Setup Global
   Handle<JSFunction> global_constructor =
       InstallConstructorFunc(isolate, webassembly, "Global", WebAssemblyGlobal);
+  Handle<JSObject> global_proto =
+      SetupConstructor(isolate, global_constructor, i::WASM_GLOBAL_OBJECT_TYPE,
+                       WasmGlobalObject::kHeaderSize, "WebAssembly.Global");
   context->set_wasm_global_constructor(*global_constructor);
-  SetDummyInstanceTemplate(isolate, global_constructor);
-  JSFunction::EnsureHasInitialMap(global_constructor);
-  Handle<JSObject> global_proto(
-      JSObject::cast(global_constructor->instance_prototype()), isolate);
-  Handle<Map> global_map = isolate->factory()->NewMap(
-      i::WASM_GLOBAL_OBJECT_TYPE, WasmGlobalObject::kHeaderSize);
-  JSFunction::SetInitialMap(isolate, global_constructor, global_map,
-                            global_proto);
   InstallFunc(isolate, global_proto, "valueOf", WebAssemblyGlobalValueOf, 0,
               false, NONE, SideEffectType::kHasNoSideEffect);
   InstallGetterSetter(isolate, global_proto, "value", WebAssemblyGlobalGetValue,
                       WebAssemblyGlobalSetValue);
   if (enabled_features.has_type_reflection()) {
-    InstallFunc(isolate, global_constructor, "type", WebAssemblyGlobalType, 1);
+    InstallFunc(isolate, global_proto, "type", WebAssemblyGlobalType, 0, false,
+                NONE, SideEffectType::kHasNoSideEffect);
   }
-  JSObject::AddProperty(isolate, global_proto, factory->to_string_tag_symbol(),
-                        v8_str(isolate, "WebAssembly.Global"), ro_attributes);
 
   // Setup Exception
   if (enabled_features.has_eh()) {
     Handle<JSFunction> tag_constructor =
         InstallConstructorFunc(isolate, webassembly, "Tag", WebAssemblyTag);
+    Handle<JSObject> tag_proto =
+        SetupConstructor(isolate, tag_constructor, i::WASM_TAG_OBJECT_TYPE,
+                         WasmTagObject::kHeaderSize, "WebAssembly.Tag");
     context->set_wasm_tag_constructor(*tag_constructor);
 
-    SetDummyInstanceTemplate(isolate, tag_constructor);
-    JSFunction::EnsureHasInitialMap(tag_constructor);
-    Handle<JSObject> tag_proto(
-        JSObject::cast(tag_constructor->instance_prototype()), isolate);
-    JSObject::AddProperty(isolate, tag_proto, factory->to_string_tag_symbol(),
-                          v8_str(isolate, "WebAssembly.Tag"), ro_attributes);
     if (enabled_features.has_type_reflection()) {
       InstallFunc(isolate, tag_proto, "type", WebAssemblyTagType, 0);
     }
-    Handle<Map> tag_map = isolate->factory()->NewMap(
-        i::WASM_TAG_OBJECT_TYPE, WasmTagObject::kHeaderSize);
-    JSFunction::SetInitialMap(isolate, tag_constructor, tag_map, tag_proto);
-
     // Set up runtime exception constructor.
     Handle<JSFunction> exception_constructor = InstallConstructorFunc(
         isolate, webassembly, "Exception", WebAssemblyException);
@@ -2679,6 +2818,25 @@ void WasmJs::Install(Isolate* isolate, bool exposed_on_global_object) {
     context->set_wasm_exception_constructor(*exception_constructor);
     JSFunction::SetInitialMap(isolate, exception_constructor, exception_map,
                               exception_proto);
+  }
+
+  // Setup Suspender.
+  if (enabled_features.has_stack_switching()) {
+    Handle<JSFunction> suspender_constructor = InstallConstructorFunc(
+        isolate, webassembly, "Suspender", WebAssemblySuspender);
+    context->set_wasm_suspender_constructor(*suspender_constructor);
+    Handle<JSObject> suspender_proto = SetupConstructor(
+        isolate, suspender_constructor, i::WASM_SUSPENDER_OBJECT_TYPE,
+        WasmSuspenderObject::kHeaderSize, "WebAssembly.Suspender");
+    InstallFunc(isolate, suspender_proto, "returnPromiseOnSuspend",
+                WebAssemblySuspenderReturnPromiseOnSuspend, 1);
+    std::unique_ptr<wasm::StackMemory> stack(
+        wasm::StackMemory::GetCurrentStackView(isolate));
+    auto continuation = WasmContinuationObject::New(isolate, std::move(stack));
+    isolate->heap()
+        ->roots_table()
+        .slot(RootIndex::kActiveContinuation)
+        .store(*continuation);
   }
 
   // Setup Function
@@ -2770,16 +2928,12 @@ void WasmJs::InstallConditionalFeatures(Isolate* isolate,
     }
     // Install the constructor on the context.
     context->set_wasm_tag_constructor(*tag_constructor);
-    SetDummyInstanceTemplate(isolate, tag_constructor);
-    JSFunction::EnsureHasInitialMap(tag_constructor);
-    Handle<JSObject> tag_proto(
-        JSObject::cast(tag_constructor->instance_prototype()), isolate);
+    Handle<JSObject> tag_proto =
+        SetupConstructor(isolate, tag_constructor, i::WASM_TAG_OBJECT_TYPE,
+                         WasmTagObject::kHeaderSize, "WebAssembly.Tag");
     if (enabled_features.has_type_reflection()) {
       InstallFunc(isolate, tag_proto, "type", WebAssemblyTagType, 0);
     }
-    Handle<Map> tag_map = isolate->factory()->NewMap(
-        i::WASM_TAG_OBJECT_TYPE, WasmTagObject::kHeaderSize);
-    JSFunction::SetInitialMap(isolate, tag_constructor, tag_map, tag_proto);
   }
 }
 #undef ASSIGN

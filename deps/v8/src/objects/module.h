@@ -10,7 +10,6 @@
 #include "src/objects/js-objects.h"
 #include "src/objects/objects.h"
 #include "src/objects/struct.h"
-#include "torque-generated/field-offsets.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -160,6 +159,10 @@ class JSModuleNamespace
   static V8_WARN_UNUSED_RESULT Maybe<PropertyAttributes> GetPropertyAttributes(
       LookupIterator* it);
 
+  static V8_WARN_UNUSED_RESULT Maybe<bool> DefineOwnProperty(
+      Isolate* isolate, Handle<JSModuleNamespace> o, Handle<Object> key,
+      PropertyDescriptor* desc, Maybe<ShouldThrow> should_throw);
+
   // In-object fields.
   enum {
     kToStringTagFieldIndex,
@@ -172,6 +175,13 @@ class JSModuleNamespace
       kHeaderSize + (kTaggedSize * kInObjectFieldCount);
 
   TQ_OBJECT_CONSTRUCTORS(JSModuleNamespace)
+};
+
+class ScriptOrModule
+    : public TorqueGeneratedScriptOrModule<ScriptOrModule, Struct> {
+ public:
+  DECL_PRINTER(ScriptOrModule)
+  TQ_OBJECT_CONSTRUCTORS(ScriptOrModule)
 };
 
 }  // namespace internal

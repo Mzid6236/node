@@ -291,6 +291,7 @@ class V8_EXPORT_PRIVATE NativeModuleSerializer {
   const base::Vector<WasmCode* const> code_table_;
   bool write_called_ = false;
   size_t total_written_code_ = 0;
+  int num_turbofan_functions_ = 0;
 };
 
 NativeModuleSerializer::NativeModuleSerializer(
@@ -303,7 +304,7 @@ NativeModuleSerializer::NativeModuleSerializer(
 
 size_t NativeModuleSerializer::MeasureCode(const WasmCode* code) const {
   if (code == nullptr) return sizeof(bool);
-  DCHECK_EQ(WasmCode::kFunction, code->kind());
+  DCHECK_EQ(WasmCode::kWasmFunction, code->kind());
   if (code->tier() != ExecutionTier::kTurbofan) {
     return sizeof(bool);
   }
@@ -334,13 +335,14 @@ bool NativeModuleSerializer::WriteCode(const WasmCode* code, Writer* writer) {
     writer->Write(false);
     return true;
   }
-  DCHECK_EQ(WasmCode::kFunction, code->kind());
+  DCHECK_EQ(WasmCode::kWasmFunction, code->kind());
   // Only serialize TurboFan code, as Liftoff code can contain breakpoints or
   // non-relocatable constants.
   if (code->tier() != ExecutionTier::kTurbofan) {
     writer->Write(false);
     return true;
   }
+  ++num_turbofan_functions_;
   writer->Write(true);
   // Write the size of the entire code section, followed by the code header.
   writer->Write(code->constant_pool_offset());
@@ -449,6 +451,8 @@ bool NativeModuleSerializer::Write(Writer* writer) {
   for (WasmCode* code : code_table_) {
     if (!WriteCode(code, writer)) return false;
   }
+  // If not a single function was written, serialization was not successful.
+  if (num_turbofan_functions_ == 0) return false;
 
   // Make sure that the serialized total code size was correct.
   CHECK_EQ(total_written_code_, total_code_size);

@@ -11,9 +11,11 @@
 #include "src/diagnostics/compilation-statistics.h"
 #include "src/execution/frames.h"
 #include "src/execution/v8threads.h"
+#include "src/handles/global-handles-inl.h"
 #include "src/logging/counters.h"
 #include "src/objects/heap-number.h"
 #include "src/objects/js-promise.h"
+#include "src/objects/managed-inl.h"
 #include "src/objects/objects-inl.h"
 #include "src/strings/string-hasher-inl.h"
 #include "src/utils/ostreams.h"
@@ -459,15 +461,22 @@ WasmEngine::~WasmEngine() {
 }
 
 bool WasmEngine::SyncValidate(Isolate* isolate, const WasmFeatures& enabled,
-                              const ModuleWireBytes& bytes) {
+                              const ModuleWireBytes& bytes,
+                              std::string* error_message) {
   TRACE_EVENT0("v8.wasm", "wasm.SyncValidate");
   // TODO(titzer): remove dependency on the isolate.
-  if (bytes.start() == nullptr || bytes.length() == 0) return false;
-  ModuleResult result = DecodeWasmModule(
+  if (bytes.start() == nullptr || bytes.length() == 0) {
+    if (error_message) *error_message = "empty module wire bytes";
+    return false;
+  }
+  auto result = DecodeWasmModule(
       enabled, bytes.start(), bytes.end(), true, kWasmOrigin,
       isolate->counters(), isolate->metrics_recorder(),
       isolate->GetOrRegisterRecorderContextId(isolate->native_context()),
       DecodingMethod::kSync, allocator());
+  if (result.failed() && error_message) {
+    *error_message = result.error().message();
+  }
   return result.ok();
 }
 
@@ -884,6 +893,14 @@ void WasmEngine::DumpAndResetTurboStatistics() {
   compilation_stats_.reset();
 }
 
+void WasmEngine::DumpTurboStatistics() {
+  base::MutexGuard guard(&mutex_);
+  if (compilation_stats_ != nullptr) {
+    StdoutStream os;
+    os << AsPrintableStatistics{*compilation_stats_.get(), false} << std::endl;
+  }
+}
+
 CodeTracer* WasmEngine::GetCodeTracer() {
   base::MutexGuard guard(&mutex_);
   if (code_tracer_ == nullptr) code_tracer_.reset(new CodeTracer(-1));
@@ -1034,10 +1051,10 @@ void WasmEngine::RemoveIsolate(Isolate* isolate) {
   for (auto* native_module : info->native_modules) {
     DCHECK_EQ(1, native_modules_.count(native_module));
     DCHECK_EQ(1, native_modules_[native_module]->isolates.count(isolate));
-    auto* info = native_modules_[native_module].get();
-    info->isolates.erase(isolate);
+    auto* module = native_modules_[native_module].get();
+    module->isolates.erase(isolate);
     if (current_gc_info_) {
-      for (WasmCode* code : info->potentially_dead_code) {
+      for (WasmCode* code : module->potentially_dead_code) {
         current_gc_info_->dead_code.erase(code);
       }
     }
@@ -1169,10 +1186,13 @@ std::shared_ptr<NativeModule> WasmEngine::NewNativeModule(
 std::shared_ptr<NativeModule> WasmEngine::MaybeGetNativeModule(
     ModuleOrigin origin, base::Vector<const uint8_t> wire_bytes,
     Isolate* isolate) {
+  TRACE_EVENT1("v8.wasm", "wasm.GetNativeModuleFromCache", "wire_bytes",
+               wire_bytes.size());
   std::shared_ptr<NativeModule> native_module =
       native_module_cache_.MaybeGetNativeModule(origin, wire_bytes);
   bool recompile_module = false;
   if (native_module) {
+    TRACE_EVENT0("v8.wasm", "CacheHit");
     base::MutexGuard guard(&mutex_);
     auto& native_module_info = native_modules_[native_module.get()];
     if (!native_module_info) {
@@ -1219,7 +1239,15 @@ bool WasmEngine::UpdateNativeModuleCache(
 }
 
 bool WasmEngine::GetStreamingCompilationOwnership(size_t prefix_hash) {
-  return native_module_cache_.GetStreamingCompilationOwnership(prefix_hash);
+  TRACE_EVENT0("v8.wasm", "wasm.GetStreamingCompilationOwnership");
+  if (native_module_cache_.GetStreamingCompilationOwnership(prefix_hash)) {
+    return true;
+  }
+  // This is only a marker, not for tracing execution time. There should be a
+  // later "wasm.GetNativeModuleFromCache" event for trying to get the module
+  // from the cache.
+  TRACE_EVENT0("v8.wasm", "CacheHit");
+  return false;
 }
 
 void WasmEngine::StreamingCompilationFailed(size_t prefix_hash) {
@@ -1228,9 +1256,9 @@ void WasmEngine::StreamingCompilationFailed(size_t prefix_hash) {
 
 void WasmEngine::FreeNativeModule(NativeModule* native_module) {
   base::MutexGuard guard(&mutex_);
-  auto it = native_modules_.find(native_module);
-  DCHECK_NE(native_modules_.end(), it);
-  for (Isolate* isolate : it->second->isolates) {
+  auto module = native_modules_.find(native_module);
+  DCHECK_NE(native_modules_.end(), module);
+  for (Isolate* isolate : module->second->isolates) {
     DCHECK_EQ(1, isolates_.count(isolate));
     IsolateInfo* info = isolates_[isolate].get();
     DCHECK_EQ(1, info->native_modules.count(native_module));
@@ -1274,7 +1302,7 @@ void WasmEngine::FreeNativeModule(NativeModule* native_module) {
                   native_module, current_gc_info_->dead_code.size());
   }
   native_module_cache_.Erase(native_module);
-  native_modules_.erase(it);
+  native_modules_.erase(module);
 }
 
 namespace {

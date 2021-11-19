@@ -153,6 +153,7 @@ class JSSpeculativeBinopBuilder final {
   }
 
   const Operator* SpeculativeBigIntOp(BigIntOperationHint hint) {
+    DCHECK(jsgraph()->machine()->Is64());
     switch (op_->opcode()) {
       case IrOpcode::kJSAdd:
         return simplified()->SpeculativeBigIntAdd(hint);
@@ -206,6 +207,7 @@ class JSSpeculativeBinopBuilder final {
   }
 
   Node* TryBuildBigIntBinop() {
+    DCHECK(jsgraph()->machine()->Is64());
     BigIntOperationHint hint;
     if (GetBinaryBigIntOperationHint(&hint)) {
       const Operator* op = SpeculativeBigIntOp(hint);
@@ -321,10 +323,12 @@ JSTypeHintLowering::LoweringResult JSTypeHintLowering::ReduceUnaryOperation(
           jsgraph()->SmiConstant(-1), effect, control, slot);
       node = b.TryBuildNumberBinop();
       if (!node) {
-        if (GetBinaryOperationHint(slot) == BinaryOperationHint::kBigInt) {
-          const Operator* op = jsgraph()->simplified()->SpeculativeBigIntNegate(
-              BigIntOperationHint::kBigInt);
-          node = jsgraph()->graph()->NewNode(op, operand, effect, control);
+        if (jsgraph()->machine()->Is64()) {
+          if (GetBinaryOperationHint(slot) == BinaryOperationHint::kBigInt) {
+            op = jsgraph()->simplified()->SpeculativeBigIntNegate(
+                BigIntOperationHint::kBigInt);
+            node = jsgraph()->graph()->NewNode(op, operand, effect, control);
+          }
         }
       }
       break;
@@ -403,8 +407,10 @@ JSTypeHintLowering::LoweringResult JSTypeHintLowering::ReduceBinaryOperation(
       }
       if (op->opcode() == IrOpcode::kJSAdd ||
           op->opcode() == IrOpcode::kJSSubtract) {
-        if (Node* node = b.TryBuildBigIntBinop()) {
-          return LoweringResult::SideEffectFree(node, node, control);
+        if (jsgraph()->machine()->Is64()) {
+          if (Node* node = b.TryBuildBigIntBinop()) {
+            return LoweringResult::SideEffectFree(node, node, control);
+          }
         }
       }
       break;
@@ -546,7 +552,8 @@ JSTypeHintLowering::ReduceStoreKeyedOperation(const Operator* op, Node* obj,
                                               FeedbackSlot slot) const {
   DCHECK(op->opcode() == IrOpcode::kJSStoreProperty ||
          op->opcode() == IrOpcode::kJSStoreInArrayLiteral ||
-         op->opcode() == IrOpcode::kJSStoreDataPropertyInLiteral);
+         op->opcode() == IrOpcode::kJSStoreDataPropertyInLiteral ||
+         op->opcode() == IrOpcode::kJSDefineProperty);
   if (Node* node = TryBuildSoftDeopt(
           slot, effect, control,
           DeoptimizeReason::kInsufficientTypeFeedbackForGenericKeyedAccess)) {

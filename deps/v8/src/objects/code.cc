@@ -139,15 +139,6 @@ void Code::RelocateFromDesc(ByteArray reloc_info, Heap* heap,
   }
 }
 
-#ifdef VERIFY_HEAP
-void Code::VerifyRelocInfo(Isolate* isolate, ByteArray reloc_info) {
-  const int mode_mask = RelocInfo::PostCodegenRelocationMask();
-  for (RelocIterator it(*this, reloc_info, mode_mask); !it.done(); it.next()) {
-    it.rinfo()->Verify(isolate);
-  }
-}
-#endif
-
 SafepointEntry Code::GetSafepointEntry(Isolate* isolate, Address pc) {
   SafepointTable table(isolate, pc, *this);
   return table.FindEntry(pc);
@@ -363,7 +354,7 @@ bool Code::Inlines(SharedFunctionInfo sfi) {
       DeoptimizationData::cast(deoptimization_data());
   if (data.length() == 0) return false;
   if (data.SharedFunctionInfo() == sfi) return true;
-  FixedArray const literals = data.LiteralArray();
+  DeoptimizationLiteralArray const literals = data.LiteralArray();
   int const inlined_count = data.InlinedFunctionCount().value();
   for (int i = 0; i < inlined_count; ++i) {
     if (SharedFunctionInfo::cast(literals.get(i)) == sfi) return true;

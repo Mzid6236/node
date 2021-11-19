@@ -518,6 +518,8 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
     mov(dst, Operand::SmiUntag(src), s);
   }
 
+  void SmiToInt32(Register smi) { SmiUntag(smi); }
+
   // Load an object from the root table.
   void LoadRoot(Register destination, RootIndex index) final {
     LoadRoot(destination, index, al);
@@ -755,7 +757,10 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
   }
 
   // Checks if value is in range [lower_limit, higher_limit] using a single
-  // comparison.
+  // comparison. Flags C=0 or Z=1 indicate the value is in the range (condition
+  // ls).
+  void CompareRange(Register value, unsigned lower_limit,
+                    unsigned higher_limit);
   void JumpIfIsInRange(Register value, unsigned lower_limit,
                        unsigned higher_limit, Label* on_in_range);
 
@@ -845,6 +850,10 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
 
   // Abort execution if argument is not a JSFunction, enabled via --debug-code.
   void AssertFunction(Register object);
+
+  // Abort execution if argument is not a callable JSFunction, enabled via
+  // --debug-code.
+  void AssertCallableFunction(Register object);
 
   // Abort execution if argument is not a JSBoundFunction,
   // enabled via --debug-code.

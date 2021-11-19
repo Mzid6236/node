@@ -1600,7 +1600,7 @@ void TurboAssembler::li(Register dst, Handle<HeapObject> value,
   } else if (RelocInfo::IsCompressedEmbeddedObject(rmode)) {
     EmbeddedObjectIndex index = AddEmbeddedObject(value);
     DCHECK(is_uint32(index));
-    li(dst, Operand(static_cast<int>(index), rmode));
+    li(dst, Operand(index, rmode));
   } else {
     DCHECK(RelocInfo::IsFullEmbeddedObject(rmode));
     li(dst, Operand(value.address(), rmode));
@@ -1633,7 +1633,7 @@ static inline int InstrCountForLiLower32Bit(int64_t value) {
 }
 
 int TurboAssembler::InstrCountForLi64Bit(int64_t value) {
-  if (is_int32(value)) {
+  if (is_int32(value + 0x800)) {
     return InstrCountForLiLower32Bit(value);
   } else {
     return li_estimate(value);
@@ -1670,16 +1670,6 @@ void TurboAssembler::li(Register rd, Operand j, LiFlags mode) {
         Li(rd, j.immediate());
       }
     }
-  } else if (IsOnHeap() && RelocInfo::IsEmbeddedObjectMode(j.rmode())) {
-    BlockGrowBufferScope block_growbuffer(this);
-    int offset = pc_offset();
-    Address address = j.immediate();
-    saved_handles_for_raw_object_ptr_.emplace_back(offset, address);
-    Handle<HeapObject> object(reinterpret_cast<Address*>(address));
-    int64_t immediate = object->ptr();
-    RecordRelocInfo(j.rmode(), immediate);
-    li_ptr(rd, immediate);
-    DCHECK(EmbeddedObjectMatches(offset, object));
   } else if (MustUseReg(j.rmode())) {
     int64_t immediate;
     if (j.IsHeapObjectRequest()) {
@@ -2045,19 +2035,12 @@ void TurboAssembler::RoundHelper(FPURegister dst, FPURegister src,
   // Need at least two FPRs, so check against dst == src == fpu_scratch
   DCHECK(!(dst == src && dst == fpu_scratch));
 
-  const int kFloat32ExponentBias = 127;
-  const int kFloat32MantissaBits = 23;
-  const int kFloat32ExponentBits = 8;
-  const int kFloat64ExponentBias = 1023;
-  const int kFloat64MantissaBits = 52;
-  const int kFloat64ExponentBits = 11;
   const int kFloatMantissaBits =
       sizeof(F) == 4 ? kFloat32MantissaBits : kFloat64MantissaBits;
   const int kFloatExponentBits =
       sizeof(F) == 4 ? kFloat32ExponentBits : kFloat64ExponentBits;
   const int kFloatExponentBias =
       sizeof(F) == 4 ? kFloat32ExponentBias : kFloat64ExponentBias;
-
   Label done;
 
   {
@@ -2154,6 +2137,72 @@ void TurboAssembler::RoundHelper(FPURegister dst, FPURegister src,
   }
 
   bind(&done);
+}
+
+// According to JS ECMA specification, for floating-point round operations, if
+// the input is NaN, +/-infinity, or +/-0, the same input is returned as the
+// rounded result; this differs from behavior of RISCV fcvt instructions (which
+// round out-of-range values to the nearest max or min value), therefore special
+// handling is needed by NaN, +/-Infinity, +/-0
+template <typename F>
+void TurboAssembler::RoundHelper(VRegister dst, VRegister src, Register scratch,
+                                 VRegister v_scratch, RoundingMode frm) {
+  VU.set(scratch, std::is_same<F, float>::value ? E32 : E64, m1);
+  // if src is NaN/+-Infinity/+-Zero or if the exponent is larger than # of bits
+  // in mantissa, the result is the same as src, so move src to dest  (to avoid
+  // generating another branch)
+
+  // If real exponent (i.e., scratch2 - kFloatExponentBias) is greater than
+  // kFloat32MantissaBits, it means the floating-point value has no fractional
+  // part, thus the input is already rounded, jump to done. Note that, NaN and
+  // Infinity in floating-point representation sets maximal exponent value, so
+  // they also satisfy (scratch2 - kFloatExponentBias >= kFloatMantissaBits),
+  // and JS round semantics specify that rounding of NaN (Infinity) returns NaN
+  // (Infinity), so NaN and Infinity are considered rounded value too.
+  li(scratch, 64 - kFloat32MantissaBits - kFloat32ExponentBits);
+  vsll_vx(v_scratch, src, scratch);
+  li(scratch, 64 - kFloat32ExponentBits);
+  vsrl_vx(v_scratch, v_scratch, scratch);
+  li(scratch, kFloat32ExponentBias + kFloat32MantissaBits);
+  vmslt_vx(v0, v_scratch, scratch);
+
+  VU.set(frm);
+  vmv_vv(dst, src);
+  if (dst == src) {
+    vmv_vv(v_scratch, src);
+  }
+  vfcvt_x_f_v(dst, src, MaskType::Mask);
+  vfcvt_f_x_v(dst, dst, MaskType::Mask);
+
+  // A special handling is needed if the input is a very small positive/negative
+  // number that rounds to zero. JS semantics requires that the rounded result
+  // retains the sign of the input, so a very small positive (negative)
+  // floating-point number should be rounded to positive (negative) 0.
+  if (dst == src) {
+    vfsngj_vv(dst, dst, v_scratch);
+  } else {
+    vfsngj_vv(dst, dst, src);
+  }
+}
+
+void TurboAssembler::Ceil_f(VRegister vdst, VRegister vsrc, Register scratch,
+                            VRegister v_scratch) {
+  RoundHelper<float>(vdst, vsrc, scratch, v_scratch, RUP);
+}
+
+void TurboAssembler::Ceil_d(VRegister vdst, VRegister vsrc, Register scratch,
+                            VRegister v_scratch) {
+  RoundHelper<double>(vdst, vsrc, scratch, v_scratch, RUP);
+}
+
+void TurboAssembler::Floor_f(VRegister vdst, VRegister vsrc, Register scratch,
+                             VRegister v_scratch) {
+  RoundHelper<float>(vdst, vsrc, scratch, v_scratch, RDN);
+}
+
+void TurboAssembler::Floor_d(VRegister vdst, VRegister vsrc, Register scratch,
+                             VRegister v_scratch) {
+  RoundHelper<double>(vdst, vsrc, scratch, v_scratch, RDN);
 }
 
 void TurboAssembler::Floor_d_d(FPURegister dst, FPURegister src,
@@ -3491,8 +3540,10 @@ void TurboAssembler::LoadAddress(Register dst, Label* target,
                                  RelocInfo::Mode rmode) {
   int32_t offset;
   if (CalculateOffset(target, &offset, OffsetSize::kOffset32)) {
+    CHECK(is_int32(offset + 0x800));
     int32_t Hi20 = (((int32_t)offset + 0x800) >> 12);
     int32_t Lo12 = (int32_t)offset << 20 >> 20;
+    BlockTrampolinePoolScope block_trampoline_pool(this);
     auipc(dst, Hi20);
     addi(dst, dst, Lo12);
   } else {
@@ -3668,9 +3719,10 @@ void MacroAssembler::InvokePrologue(Register expected_parameter_count,
 
   // If the expected parameter count is equal to the adaptor sentinel, no need
   // to push undefined value as arguments.
-  Branch(&regular_invoke, eq, expected_parameter_count,
-         Operand(kDontAdaptArgumentsSentinel));
-
+  if (kDontAdaptArgumentsSentinel != 0) {
+    Branch(&regular_invoke, eq, expected_parameter_count,
+           Operand(kDontAdaptArgumentsSentinel));
+  }
   // If overapplication or if the actual argument count is equal to the
   // formal parameter count, no need to push extra undefined values.
   Sub64(expected_parameter_count, expected_parameter_count,
@@ -3700,7 +3752,11 @@ void MacroAssembler::InvokePrologue(Register expected_parameter_count,
     Sub64(t0, t0, Operand(1));
     Add64(src, src, Operand(kSystemPointerSize));
     Add64(dest, dest, Operand(kSystemPointerSize));
-    Branch(&copy, ge, t0, Operand(zero_reg));
+    if (kJSArgcIncludesReceiver) {
+      Branch(&copy, gt, t0, Operand(zero_reg));
+    } else {
+      Branch(&copy, ge, t0, Operand(zero_reg));
+    }
   }
 
   // Fill remaining expected arguments with undefined values.
@@ -3717,8 +3773,8 @@ void MacroAssembler::InvokePrologue(Register expected_parameter_count,
 
   bind(&stack_overflow);
   {
-    FrameScope frame(this,
-                     has_frame() ? StackFrame::NONE : StackFrame::INTERNAL);
+    FrameScope frame(
+        this, has_frame() ? StackFrame::NO_FRAME_TYPE : StackFrame::INTERNAL);
     CallRuntime(Runtime::kThrowStackOverflow);
     break_(0xCC);
   }
@@ -3743,8 +3799,8 @@ void MacroAssembler::CheckDebugHook(Register fun, Register new_target,
     Register receiver = temps.Acquire();
     LoadReceiver(receiver, actual_parameter_count);
 
-    FrameScope frame(this,
-                     has_frame() ? StackFrame::NONE : StackFrame::INTERNAL);
+    FrameScope frame(
+        this, has_frame() ? StackFrame::NO_FRAME_TYPE : StackFrame::INTERNAL);
     SmiTag(expected_parameter_count);
     Push(expected_parameter_count);
 
@@ -4152,9 +4208,9 @@ void TurboAssembler::Abort(AbortReason reason) {
 
   if (should_abort_hard()) {
     // We don't care if we constructed a frame. Just pretend we did.
-    FrameScope assume_frame(this, StackFrame::NONE);
+    FrameScope assume_frame(this, StackFrame::NO_FRAME_TYPE);
     PrepareCallCFunction(0, a0);
-    li(a0, Operand(static_cast<int>(reason)));
+    li(a0, Operand(static_cast<int64_t>(reason)));
     CallCFunction(ExternalReference::abort_with_reason(), 1);
     return;
   }
@@ -4165,7 +4221,7 @@ void TurboAssembler::Abort(AbortReason reason) {
   if (!has_frame()) {
     // We don't actually want to generate a pile of code for this, so just
     // claim there is a stack frame, without generating one.
-    FrameScope scope(this, StackFrame::NONE);
+    FrameScope scope(this, StackFrame::NO_FRAME_TYPE);
     Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
   } else {
     Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
@@ -4417,6 +4473,14 @@ void TurboAssembler::SmiUntag(Register dst, const MemOperand& src) {
   }
 }
 
+void TurboAssembler::SmiToInt32(Register smi) {
+  if (FLAG_enable_slow_asserts) {
+    AssertSmi(smi);
+  }
+  DCHECK(SmiValuesAre32Bits() || SmiValuesAre31Bits());
+  SmiUntag(smi);
+}
+
 void TurboAssembler::JumpIfSmi(Register value, Label* smi_label) {
   DCHECK_EQ(0, kSmiTag);
   UseScratchRegisterScope temps(this);
@@ -4433,21 +4497,21 @@ void MacroAssembler::JumpIfNotSmi(Register value, Label* not_smi_label) {
   Branch(not_smi_label, ne, scratch, Operand(zero_reg));
 }
 
-void MacroAssembler::AssertNotSmi(Register object) {
+void TurboAssembler::AssertNotSmi(Register object, AbortReason reason) {
   if (FLAG_debug_code) {
     STATIC_ASSERT(kSmiTag == 0);
     DCHECK(object != kScratchReg);
     andi(kScratchReg, object, kSmiTagMask);
-    Check(ne, AbortReason::kOperandIsASmi, kScratchReg, Operand(zero_reg));
+    Check(ne, reason, kScratchReg, Operand(zero_reg));
   }
 }
 
-void MacroAssembler::AssertSmi(Register object) {
+void TurboAssembler::AssertSmi(Register object, AbortReason reason) {
   if (FLAG_debug_code) {
     STATIC_ASSERT(kSmiTag == 0);
     DCHECK(object != kScratchReg);
     andi(kScratchReg, object, kSmiTagMask);
-    Check(eq, AbortReason::kOperandIsASmi, kScratchReg, Operand(zero_reg));
+    Check(eq, reason, kScratchReg, Operand(zero_reg));
   }
 }
 
@@ -4485,6 +4549,22 @@ void MacroAssembler::AssertFunction(Register object) {
           Operand(LAST_JS_FUNCTION_TYPE - FIRST_JS_FUNCTION_TYPE));
     pop(object);
   }
+}
+
+void MacroAssembler::AssertCallableFunction(Register object) {
+  if (!FLAG_debug_code) return;
+  ASM_CODE_COMMENT(this);
+  STATIC_ASSERT(kSmiTag == 0);
+  AssertNotSmi(object, AbortReason::kOperandIsASmiAndNotAFunction);
+  push(object);
+  LoadMap(object, object);
+  UseScratchRegisterScope temps(this);
+  Register range = temps.Acquire();
+  GetInstanceTypeRange(object, object, FIRST_CALLABLE_JS_FUNCTION_TYPE, range);
+  Check(Uless_equal, AbortReason::kOperandIsNotACallableFunction, range,
+        Operand(LAST_CALLABLE_JS_FUNCTION_TYPE -
+                FIRST_CALLABLE_JS_FUNCTION_TYPE));
+  pop(object);
 }
 
 void MacroAssembler::AssertBoundFunction(Register object) {
@@ -4970,6 +5050,46 @@ void TurboAssembler::DecompressAnyTagged(const Register& destination,
   Lwu(destination, field_operand);
   Add64(destination, kPtrComprCageBaseRegister, destination);
   RecordComment("]");
+}
+
+void MacroAssembler::DropArguments(Register count, ArgumentsCountType type,
+                                   ArgumentsCountMode mode, Register scratch) {
+  switch (type) {
+    case kCountIsInteger: {
+      CalcScaledAddress(sp, sp, count, kPointerSizeLog2);
+      break;
+    }
+    case kCountIsSmi: {
+      STATIC_ASSERT(kSmiTagSize == 1 && kSmiTag == 0);
+      DCHECK_NE(scratch, no_reg);
+      SmiScale(scratch, count, kPointerSizeLog2);
+      Add64(sp, sp, scratch);
+      break;
+    }
+    case kCountIsBytes: {
+      Add64(sp, sp, count);
+      break;
+    }
+  }
+  if (mode == kCountExcludesReceiver) {
+    Add64(sp, sp, kSystemPointerSize);
+  }
+}
+
+void MacroAssembler::DropArgumentsAndPushNewReceiver(Register argc,
+                                                     Register receiver,
+                                                     ArgumentsCountType type,
+                                                     ArgumentsCountMode mode,
+                                                     Register scratch) {
+  DCHECK(!AreAliased(argc, receiver));
+  if (mode == kCountExcludesReceiver) {
+    // Drop arguments without receiver and override old receiver.
+    DropArguments(argc, type, kCountIncludesReceiver, scratch);
+    Sd(receiver, MemOperand(sp));
+  } else {
+    DropArguments(argc, type, mode, scratch);
+    push(receiver);
+  }
 }
 
 }  // namespace internal

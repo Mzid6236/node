@@ -442,7 +442,7 @@ void TestSmiIndex(MacroAssembler* masm, Label* exit, int id, int x) {
 
 TEST(EmbeddedObj) {
 #ifdef V8_COMPRESS_POINTERS
-  FLAG_always_compact = true;
+  FLAG_compact_on_every_full_gc = true;
   v8::V8::Initialize();
 
   Isolate* isolate = CcTest::i_isolate();
@@ -480,15 +480,20 @@ TEST(EmbeddedObj) {
   CcTest::CollectAllGarbage();
   CcTest::CollectAllGarbage();
 
+  PtrComprCageBase cage_base(isolate);
+
   // Test the user-facing reloc interface.
   const int mode_mask = RelocInfo::EmbeddedObjectModeMask();
   for (RelocIterator it(*code, mode_mask); !it.done(); it.next()) {
     RelocInfo::Mode mode = it.rinfo()->rmode();
     if (RelocInfo::IsCompressedEmbeddedObject(mode)) {
-      CHECK_EQ(*my_array, it.rinfo()->target_object());
+      CHECK_EQ(*my_array, it.rinfo()->target_object(cage_base));
+      if (!V8_EXTERNAL_CODE_SPACE_BOOL) {
+        CHECK_EQ(*my_array, it.rinfo()->target_object(cage_base));
+      }
     } else {
       CHECK(RelocInfo::IsFullEmbeddedObject(mode));
-      CHECK_EQ(*old_array, it.rinfo()->target_object());
+      CHECK_EQ(*old_array, it.rinfo()->target_object(cage_base));
     }
   }
 #endif  // V8_COMPRESS_POINTERS
@@ -893,7 +898,7 @@ void TestFloat32x4Abs(MacroAssembler* masm, Label* exit, float x, float y,
   __ Movss(Operand(rsp, 3 * kFloatSize), xmm4);
   __ Movups(xmm0, Operand(rsp, 0));
 
-  __ Absps(xmm0, xmm0);
+  __ Absps(xmm0, xmm0, kScratchRegister);
   __ Movups(Operand(rsp, 0), xmm0);
 
   __ incq(rax);
@@ -930,7 +935,7 @@ void TestFloat32x4Neg(MacroAssembler* masm, Label* exit, float x, float y,
   __ Movss(Operand(rsp, 3 * kFloatSize), xmm4);
   __ Movups(xmm0, Operand(rsp, 0));
 
-  __ Negps(xmm0, xmm0);
+  __ Negps(xmm0, xmm0, kScratchRegister);
   __ Movups(Operand(rsp, 0), xmm0);
 
   __ incq(rax);
@@ -962,7 +967,7 @@ void TestFloat64x2Abs(MacroAssembler* masm, Label* exit, double x, double y) {
   __ Movsd(Operand(rsp, 1 * kDoubleSize), xmm2);
   __ movupd(xmm0, Operand(rsp, 0));
 
-  __ Abspd(xmm0, xmm0);
+  __ Abspd(xmm0, xmm0, kScratchRegister);
   __ movupd(Operand(rsp, 0), xmm0);
 
   __ incq(rax);
@@ -986,7 +991,7 @@ void TestFloat64x2Neg(MacroAssembler* masm, Label* exit, double x, double y) {
   __ Movsd(Operand(rsp, 1 * kDoubleSize), xmm2);
   __ movupd(xmm0, Operand(rsp, 0));
 
-  __ Negpd(xmm0, xmm0);
+  __ Negpd(xmm0, xmm0, kScratchRegister);
   __ movupd(Operand(rsp, 0), xmm0);
 
   __ incq(rax);

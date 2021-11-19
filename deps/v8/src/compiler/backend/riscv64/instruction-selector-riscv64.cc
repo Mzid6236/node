@@ -363,9 +363,9 @@ void InstructionSelector::VisitStackSlot(Node* node) {
        sequence()->AddImmediate(Constant(alignment)), 0, nullptr);
 }
 
-void InstructionSelector::VisitAbortCSAAssert(Node* node) {
+void InstructionSelector::VisitAbortCSADcheck(Node* node) {
   RiscvOperandGenerator g(this);
-  Emit(kArchAbortCSAAssert, g.NoOutput(), g.UseFixed(node->InputAt(0), a0));
+  Emit(kArchAbortCSADcheck, g.NoOutput(), g.UseFixed(node->InputAt(0), a0));
 }
 
 void EmitLoad(InstructionSelector* selector, Node* node, InstructionCode opcode,
@@ -454,7 +454,7 @@ void InstructionSelector::VisitLoad(Node* node) {
       opcode = load_rep.IsUnsigned() ? kRiscvLhu : kRiscvLh;
       break;
     case MachineRepresentation::kWord32:
-      opcode = load_rep.IsUnsigned() ? kRiscvLwu : kRiscvLw;
+      opcode = kRiscvLw;
       break;
 #ifdef V8_COMPRESS_POINTERS
     case MachineRepresentation::kTaggedSigned:
@@ -485,6 +485,7 @@ void InstructionSelector::VisitLoad(Node* node) {
 #else
                                                  // Fall through.
 #endif
+    case MachineRepresentation::kCagedPointer:
     case MachineRepresentation::kMapWord:  // Fall through.
     case MachineRepresentation::kNone:
       UNREACHABLE();
@@ -564,6 +565,7 @@ void InstructionSelector::VisitStore(Node* node) {
 #else
         UNREACHABLE();
 #endif
+      case MachineRepresentation::kCagedPointer:
       case MachineRepresentation::kMapWord:            // Fall through.
       case MachineRepresentation::kNone:
         UNREACHABLE();
@@ -939,7 +941,7 @@ void InstructionSelector::VisitInt64Mul(Node* node) {
   Int64BinopMatcher m(node);
   // TODO(dusmil): Add optimization for shifts larger than 32.
   if (m.right().HasResolvedValue() && m.right().ResolvedValue() > 0) {
-    uint32_t value = static_cast<uint32_t>(m.right().ResolvedValue());
+    uint64_t value = static_cast<uint64_t>(m.right().ResolvedValue());
     if (base::bits::IsPowerOfTwo(value)) {
       Emit(kRiscvShl64 | AddressingModeField::encode(kMode_None),
            g.DefineAsRegister(node), g.UseRegister(m.left().node()),
@@ -1287,7 +1289,6 @@ bool InstructionSelector::ZeroExtendsWord32ToWord64NoPhis(Node* node) {
       switch (load_rep.representation()) {
         case MachineRepresentation::kWord8:
         case MachineRepresentation::kWord16:
-        case MachineRepresentation::kWord32:
           return true;
         default:
           return false;
@@ -1623,7 +1624,7 @@ void InstructionSelector::VisitUnalignedLoad(Node* node) {
       opcode = load_rep.IsUnsigned() ? kRiscvUlhu : kRiscvUlh;
       break;
     case MachineRepresentation::kWord32:
-      opcode = load_rep.IsUnsigned() ? kRiscvUlwu : kRiscvUlw;
+      opcode = kRiscvUlw;
       break;
     case MachineRepresentation::kTaggedSigned:   // Fall through.
     case MachineRepresentation::kTaggedPointer:  // Fall through.
@@ -1637,6 +1638,7 @@ void InstructionSelector::VisitUnalignedLoad(Node* node) {
     case MachineRepresentation::kBit:                // Fall through.
     case MachineRepresentation::kCompressedPointer:  // Fall through.
     case MachineRepresentation::kCompressed:         // Fall through.
+    case MachineRepresentation::kCagedPointer:
     case MachineRepresentation::kMapWord:            // Fall through.
     case MachineRepresentation::kNone:
       UNREACHABLE();
@@ -1691,6 +1693,7 @@ void InstructionSelector::VisitUnalignedStore(Node* node) {
     case MachineRepresentation::kBit:                // Fall through.
     case MachineRepresentation::kCompressedPointer:  // Fall through.
     case MachineRepresentation::kCompressed:         // Fall through.
+    case MachineRepresentation::kCagedPointer:
     case MachineRepresentation::kMapWord:            // Fall through.
     case MachineRepresentation::kNone:
       UNREACHABLE();

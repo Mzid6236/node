@@ -49,7 +49,11 @@ class PropertyAccessInfo;
 
 // Whether we are loading a property or storing to a property.
 // For a store during literal creation, do not walk up the prototype chain.
-enum class AccessMode { kLoad, kStore, kStoreInLiteral, kHas };
+// For a define operation, we behave similarly to kStoreInLiteral, but with
+// distinct semantics for private class fields (in which private field
+// accesses must throw when storing a field which does not exist, or
+// adding/defining a field which already exists).
+enum class AccessMode { kLoad, kStore, kStoreInLiteral, kHas, kDefine };
 
 inline bool IsAnyStore(AccessMode mode) {
   return mode == AccessMode::kStore || mode == AccessMode::kStoreInLiteral;
@@ -603,7 +607,6 @@ class DescriptorArrayRef : public HeapObjectRef {
 
   PropertyDetails GetPropertyDetails(InternalIndex descriptor_index) const;
   NameRef GetPropertyKey(InternalIndex descriptor_index) const;
-  ObjectRef GetFieldType(InternalIndex descriptor_index) const;
   base::Optional<ObjectRef> GetStrongValue(
       InternalIndex descriptor_index) const;
 };
@@ -742,7 +745,6 @@ class V8_EXPORT_PRIVATE MapRef : public HeapObjectRef {
   PropertyDetails GetPropertyDetails(InternalIndex descriptor_index) const;
   NameRef GetPropertyKey(InternalIndex descriptor_index) const;
   FieldIndex GetFieldIndexFor(InternalIndex descriptor_index) const;
-  ObjectRef GetFieldType(InternalIndex descriptor_index) const;
   base::Optional<ObjectRef> GetStrongValue(
       InternalIndex descriptor_number) const;
 
@@ -913,6 +915,7 @@ class V8_EXPORT_PRIVATE SharedFunctionInfoRef : public HeapObjectRef {
 
   Builtin builtin_id() const;
   int context_header_size() const;
+  int context_parameters_start() const;
   BytecodeArrayRef GetBytecodeArray() const;
   SharedFunctionInfo::Inlineability GetInlineability() const;
   base::Optional<FunctionTemplateInfoRef> function_template_info() const;

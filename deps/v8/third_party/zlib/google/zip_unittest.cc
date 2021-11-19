@@ -17,7 +17,6 @@
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/logging.h"
-#include "base/macros.h"
 #include "base/path_service.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
@@ -88,6 +87,9 @@ class VirtualFileSystem : public zip::FileAccessor {
     file_tree_[bar2_txt_path] = {};
   }
 
+  VirtualFileSystem(const VirtualFileSystem&) = delete;
+  VirtualFileSystem& operator=(const VirtualFileSystem&) = delete;
+
   ~VirtualFileSystem() override = default;
 
  private:
@@ -153,8 +155,6 @@ class VirtualFileSystem : public zip::FileAccessor {
 
   std::map<base::FilePath, DirContents> file_tree_;
   std::map<base::FilePath, base::File> files_;
-
-  DISALLOW_COPY_AND_ASSIGN(VirtualFileSystem);
 };
 
 // static
@@ -645,7 +645,7 @@ TEST_F(ZipTest, ZipProgressPeriod) {
   EXPECT_TRUE(zip::Zip({.src_dir = src_dir,
                         .dest_file = zip_file,
                         .progress_callback = std::move(progress_callback),
-                        .progress_period = base::TimeDelta::FromHours(1)}));
+                        .progress_period = base::Hours(1)}));
 
   // We expect only 2 progress reports: the first one, and the last one.
   EXPECT_EQ(progress_count, 2);

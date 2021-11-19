@@ -61,7 +61,6 @@ struct WasmModule;
   V(WasmFloat64ToNumber)                  \
   V(WasmTaggedToFloat64)                  \
   V(WasmAllocateJSArray)                  \
-  V(WasmAllocatePair)                     \
   V(WasmAtomicNotify)                     \
   V(WasmI32AtomicWait32)                  \
   V(WasmI32AtomicWait64)                  \
@@ -81,11 +80,13 @@ struct WasmModule;
   V(WasmAllocateFixedArray)               \
   V(WasmThrow)                            \
   V(WasmRethrow)                          \
+  V(WasmRethrowExplicitContext)           \
   V(WasmTraceEnter)                       \
   V(WasmTraceExit)                        \
   V(WasmTraceMemory)                      \
   V(BigIntToI32Pair)                      \
   V(BigIntToI64)                          \
+  V(CallRefIC)                            \
   V(DoubleToI)                            \
   V(I32PairToBigInt)                      \
   V(I64ToBigInt)                          \
@@ -117,6 +118,7 @@ struct WasmModule;
   V(WasmAllocateArray_Uninitialized)      \
   V(WasmAllocateArray_InitNull)           \
   V(WasmAllocateArray_InitZero)           \
+  V(WasmArrayCopy)                        \
   V(WasmArrayCopyWithChecks)              \
   V(WasmAllocateRtt)                      \
   V(WasmAllocateFreshRtt)                 \
@@ -156,12 +158,7 @@ class V8_EXPORT_PRIVATE DisjointAllocationPool final {
 
 class V8_EXPORT_PRIVATE WasmCode final {
  public:
-  enum Kind {
-    kFunction,
-    kWasmToCapiWrapper,
-    kWasmToJsWrapper,
-    kJumpTable
-  };
+  enum Kind { kWasmFunction, kWasmToCapiWrapper, kWasmToJsWrapper, kJumpTable };
 
   // Each runtime stub is identified by an id. This id is used to reference the
   // stub via {RelocInfo::WASM_STUB_CALL} and gets resolved during relocation.
@@ -318,7 +315,7 @@ class V8_EXPORT_PRIVATE WasmCode final {
 
   void Validate() const;
   void Print(const char* name = nullptr) const;
-  void MaybePrint(const char* name = nullptr) const;
+  void MaybePrint() const;
   void Disassemble(const char* name, std::ostream& os,
                    Address current_pc = kNullAddress) const;
 
@@ -420,6 +417,10 @@ class V8_EXPORT_PRIVATE WasmCode final {
   std::unique_ptr<const byte[]> ConcatenateBytes(
       std::initializer_list<base::Vector<const byte>>);
 
+  // Tries to get a reasonable name. Lazily looks up the name section, and falls
+  // back to the function index. Return value is guaranteed to not be empty.
+  std::string DebugName() const;
+
   // Code objects that have been registered with the global trap handler within
   // this process, will have a {trap_handler_index} associated with them.
   int trap_handler_index() const {
@@ -503,6 +504,9 @@ class WasmCodeAllocator {
 #if V8_TARGET_ARCH_ARM64
   // ARM64 only supports direct calls within a 128 MB range.
   static constexpr size_t kMaxCodeSpaceSize = 128 * MB;
+#elif V8_TARGET_ARCH_PPC64
+  // branches only takes 26 bits
+  static constexpr size_t kMaxCodeSpaceSize = 32 * MB;
 #else
   // Use 1024 MB limit for code spaces on other platforms. This is smaller than
   // the total allowed code space (kMaxWasmCodeMemory) to avoid unnecessarily
@@ -602,7 +606,8 @@ class WasmCodeAllocator {
 
 class V8_EXPORT_PRIVATE NativeModule final {
  public:
-#if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_S390X || V8_TARGET_ARCH_ARM64
+#if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_S390X || V8_TARGET_ARCH_ARM64 || \
+    V8_TARGET_ARCH_PPC64
   static constexpr bool kNeedsFarJumpsBetweenCodeSpaces = true;
 #else
   static constexpr bool kNeedsFarJumpsBetweenCodeSpaces = false;
@@ -729,7 +734,9 @@ class V8_EXPORT_PRIVATE NativeModule final {
 
   void LogWasmCodes(Isolate*, Script);
 
-  CompilationState* compilation_state() { return compilation_state_.get(); }
+  CompilationState* compilation_state() const {
+    return compilation_state_.get();
+  }
 
   // Create a {CompilationEnv} object for compilation. The caller has to ensure
   // that the {WasmModule} pointer stays valid while the {CompilationEnv} is
@@ -832,9 +839,7 @@ class V8_EXPORT_PRIVATE NativeModule final {
   // Get or create the debug info for this NativeModule.
   DebugInfo* GetDebugInfo();
 
-  uint32_t* num_liftoff_function_calls_array() {
-    return num_liftoff_function_calls_.get();
-  }
+  uint32_t* tiering_budget_array() { return tiering_budgets_.get(); }
 
  private:
   friend class WasmCode;
@@ -849,7 +854,8 @@ class V8_EXPORT_PRIVATE NativeModule final {
   };
 
   // Private constructor, called via {WasmCodeManager::NewNativeModule()}.
-  NativeModule(const WasmFeatures& enabled_features, VirtualMemory code_space,
+  NativeModule(const WasmFeatures& enabled_features,
+               DynamicTiering dynamic_tiering, VirtualMemory code_space,
                std::shared_ptr<const WasmModule> module,
                std::shared_ptr<Counters> async_counters,
                std::shared_ptr<NativeModule>* shared_this);
@@ -936,7 +942,7 @@ class V8_EXPORT_PRIVATE NativeModule final {
   std::unique_ptr<WasmImportWrapperCache> import_wrapper_cache_;
 
   // Array to handle number of function calls.
-  std::unique_ptr<uint32_t[]> num_liftoff_function_calls_;
+  std::unique_ptr<uint32_t[]> tiering_budgets_;
 
   // This mutex protects concurrent calls to {AddCode} and friends.
   // TODO(dlehmann): Revert this to a regular {Mutex} again.
@@ -1037,6 +1043,11 @@ class V8_EXPORT_PRIVATE WasmCodeManager final {
 
   // Returns true if there is PKU support, false otherwise.
   bool HasMemoryProtectionKeySupport() const;
+
+  // Returns {true} if the memory protection key is write-enabled for the
+  // current thread.
+  // Can only be called if {HasMemoryProtectionKeySupport()} is {true}.
+  bool MemoryProtectionKeyWritable() const;
 
   // This allocates a memory protection key (if none was allocated before),
   // independent of the --wasm-memory-protection-keys flag.

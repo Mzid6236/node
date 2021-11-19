@@ -58,6 +58,7 @@ class V8_EXPORT_PRIVATE LocalIsolate final : private HiddenLocalFactory {
   LocalHeap* heap() { return &heap_; }
 
   inline Address cage_base() const;
+  inline Address code_cage_base() const;
   inline ReadOnlyHeap* read_only_heap() const;
   inline Object root(RootIndex index) const;
   inline Handle<Object> root_handle(RootIndex index) const;
@@ -72,6 +73,8 @@ class V8_EXPORT_PRIVATE LocalIsolate final : private HiddenLocalFactory {
     // undefined behavior (as static_cast cannot cast across private bases).
     return (v8::internal::LocalFactory*)this;
   }
+
+  AccountingAllocator* allocator() { return isolate_->allocator(); }
 
   bool has_pending_exception() const { return false; }
 
@@ -112,12 +115,17 @@ class V8_EXPORT_PRIVATE LocalIsolate final : private HiddenLocalFactory {
   }
   LocalIsolate* AsLocalIsolate() { return this; }
 
+  // TODO(victorgomes): Remove this when/if MacroAssembler supports LocalIsolate
+  // only constructor.
+  Isolate* GetMainThreadIsolateUnsafe() const { return isolate_; }
+
   Object* pending_message_address() {
     return isolate_->pending_message_address();
   }
 
  private:
   friend class v8::internal::LocalFactory;
+  friend class LocalIsolateFactory;
 
   void InitializeBigIntProcessor();
 

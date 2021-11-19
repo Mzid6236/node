@@ -13,6 +13,7 @@
 
 #include "include/v8-profiler.h"
 #include "src/base/platform/time.h"
+#include "src/execution/isolate.h"
 #include "src/objects/fixed-array.h"
 #include "src/objects/hash-table.h"
 #include "src/objects/heap-object.h"
@@ -349,13 +350,15 @@ class V8_EXPORT_PRIVATE V8HeapExplorer : public HeapEntriesAllocator {
   V8HeapExplorer(const V8HeapExplorer&) = delete;
   V8HeapExplorer& operator=(const V8HeapExplorer&) = delete;
 
+  V8_INLINE Isolate* isolate() { return Isolate::FromHeap(heap_); }
+
   HeapEntry* AllocateEntry(HeapThing ptr) override;
   HeapEntry* AllocateEntry(Smi smi) override;
-  int EstimateObjectsCount();
+  uint32_t EstimateObjectsCount();
   bool IterateAndExtractReferences(HeapSnapshotGenerator* generator);
   void CollectGlobalObjectsTags();
   void MakeGlobalObjectTagMap(const SafepointScope& safepoint_scope);
-  void TagBuiltinCodeObject(Code code, const char* name);
+  void TagBuiltinCodeObject(Object code, const char* name);
   HeapEntry* AddEntry(Address address,
                       HeapEntry::Type type,
                       const char* name,
@@ -567,8 +570,8 @@ class HeapSnapshotGenerator : public SnapshottingProgressReportingInterface {
   HeapEntriesMap entries_map_;
   SmiEntriesMap smis_map_;
   // Used during snapshot generation.
-  int progress_counter_;
-  int progress_total_;
+  uint32_t progress_counter_;
+  uint32_t progress_total_;
   Heap* heap_;
 };
 

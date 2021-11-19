@@ -257,6 +257,17 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   void Drop(int count, Condition cond = cc_always, Register reg = no_reg,
             const Operand& op = Operand(no_reg));
 
+  // We assume the size of the arguments is the pointer size.
+  // An optional mode argument is passed, which can indicate we need to
+  // explicitly add the receiver to the count.
+  enum ArgumentsCountMode { kCountIncludesReceiver, kCountExcludesReceiver };
+  enum ArgumentsCountType { kCountIsInteger, kCountIsSmi, kCountIsBytes };
+  void DropArguments(Register count, ArgumentsCountType type,
+                     ArgumentsCountMode mode);
+  void DropArgumentsAndPushNewReceiver(Register argc, Register receiver,
+                                       ArgumentsCountType type,
+                                       ArgumentsCountMode mode);
+
   // Trivial case of DropAndRet that utilizes the delay slot.
   void DropAndRet(int drop);
 
@@ -459,6 +470,8 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   void SmiUntag(Register reg) { sra(reg, reg, kSmiTagSize); }
 
   void SmiUntag(Register dst, Register src) { sra(dst, src, kSmiTagSize); }
+
+  void SmiToInt32(Register smi) { SmiUntag(smi); }
 
   int CalculateStackPassedWords(int num_reg_arguments,
                                 int num_double_arguments);

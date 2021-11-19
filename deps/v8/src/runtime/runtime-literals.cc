@@ -110,8 +110,8 @@ MaybeHandle<JSObject> JSObjectWalkVisitor<ContextObject>::StructureWalk(
           copy->map(isolate).instance_descriptors(isolate), isolate);
       for (InternalIndex i : copy->map(isolate).IterateOwnDescriptors()) {
         PropertyDetails details = descriptors->GetDetails(i);
-        DCHECK_EQ(kField, details.location());
-        DCHECK_EQ(kData, details.kind());
+        DCHECK_EQ(PropertyLocation::kField, details.location());
+        DCHECK_EQ(PropertyKind::kData, details.kind());
         FieldIndex index = FieldIndex::ForPropertyIndex(
             copy->map(isolate), details.field_index(),
             details.representation());
@@ -410,16 +410,16 @@ Handle<JSObject> CreateObjectLiteral(
 
     if (value->IsHeapObject()) {
       if (HeapObject::cast(*value).IsArrayBoilerplateDescription(isolate)) {
-        Handle<ArrayBoilerplateDescription> boilerplate =
+        Handle<ArrayBoilerplateDescription> array_boilerplate =
             Handle<ArrayBoilerplateDescription>::cast(value);
-        value = CreateArrayLiteral(isolate, boilerplate, allocation);
+        value = CreateArrayLiteral(isolate, array_boilerplate, allocation);
 
       } else if (HeapObject::cast(*value).IsObjectBoilerplateDescription(
                      isolate)) {
-        Handle<ObjectBoilerplateDescription> boilerplate =
+        Handle<ObjectBoilerplateDescription> object_boilerplate =
             Handle<ObjectBoilerplateDescription>::cast(value);
-        value = CreateObjectLiteral(isolate, boilerplate, boilerplate->flags(),
-                                    allocation);
+        value = CreateObjectLiteral(isolate, object_boilerplate,
+                                    object_boilerplate->flags(), allocation);
       }
     }
 
@@ -678,7 +678,8 @@ RUNTIME_FUNCTION(Runtime_CreateRegExpLiteral) {
   Handle<String> source(String::cast(regexp_instance->source()), isolate);
   Handle<RegExpBoilerplateDescription> boilerplate =
       isolate->factory()->NewRegExpBoilerplateDescription(
-          data, source, Smi::cast(regexp_instance->flags()));
+          data, source,
+          Smi::FromInt(static_cast<int>(regexp_instance->flags())));
 
   vector->SynchronizedSet(literal_slot, *boilerplate);
   DCHECK(HasBoilerplate(

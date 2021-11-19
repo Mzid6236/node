@@ -308,12 +308,15 @@ using WasmSimdEnabledCallback = bool (*)(Local<Context> context);
 // --- Callback for checking if WebAssembly exceptions are enabled ---
 using WasmExceptionsEnabledCallback = bool (*)(Local<Context> context);
 
+// --- Callback for checking if WebAssembly dynamic tiering is enabled ---
+using WasmDynamicTieringEnabledCallback = bool (*)(Local<Context> context);
+
 // --- Callback for checking if the SharedArrayBuffer constructor is enabled ---
 using SharedArrayBufferConstructorEnabledCallback =
     bool (*)(Local<Context> context);
 
 /**
- * HostImportModuleDynamicallyWithImportAssertionsCallback is called when we
+ * HostImportModuleDynamicallyCallback is called when we
  * require the embedder to load a module. This is used as part of the dynamic
  * import syntax.
  *
@@ -343,6 +346,10 @@ using HostImportModuleDynamicallyWithImportAssertionsCallback =
                             Local<ScriptOrModule> referrer,
                             Local<String> specifier,
                             Local<FixedArray> import_assertions);
+using HostImportModuleDynamicallyCallback = MaybeLocal<Promise> (*)(
+    Local<Context> context, Local<Data> host_defined_options,
+    Local<Value> resource_name, Local<String> specifier,
+    Local<FixedArray> import_assertions);
 
 /**
  * HostInitializeImportMetaObjectCallback is called the first time import.meta
